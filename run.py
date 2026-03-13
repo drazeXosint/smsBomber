@@ -1,9 +1,9 @@
-import sys
 import os
+import sys
 import asyncio
 
-# add project root to python path
-sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+# ensure project root is in python path
+sys.path.insert(0, os.path.abspath(os.path.dirname(__file__)))
 
 from bot.main import main
 
