@@ -56,14 +56,19 @@ def adminMenuKeyboard() -> InlineKeyboardMarkup:
     return builder.as_markup()
 
 
-def usersListKeyboard(page: int, totalPages: int) -> InlineKeyboardMarkup:
+def usersListKeyboard(page: int, totalPages: int, users: list) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
+    for u in users:
+        name   = u["firstName"] or "Unknown"
+        status = "BANNED" if u["isBanned"] else f"{u['testsToday']}/{u['dailyLimit']}"
+        label  = f"{name}  ·  {status}"
+        builder.button(text=label, callback_data=f"adm:user:{u['userId']}")
     if page > 0:
-        builder.button(text="Previous", callback_data=f"adm:users:{page - 1}")
+        builder.button(text="Prev", callback_data=f"adm:users:{page - 1}")
     if page < totalPages - 1:
         builder.button(text="Next", callback_data=f"adm:users:{page + 1}")
     builder.button(text="Back", callback_data="adm:menu")
-    builder.adjust(2, 1)
+    builder.adjust(1)
     return builder.as_markup()
 
 
@@ -98,31 +103,23 @@ def backToAdminKeyboard() -> InlineKeyboardMarkup:
 # Helpers
 # ---------------------------------------------------------------------------
 
-def formatUserRow(u: dict) -> str:
-    name = u["firstName"]
-    if u.get("lastName"):
-        name += f" {u['lastName']}"
-    username = f"@{u['username']}" if u.get("username") else "no username"
-    status = "BANNED" if u["isBanned"] else f"{u['testsToday']}/{u['dailyLimit']}"
-    joined = datetime.fromtimestamp(u["joinedAt"], tz=IST).strftime("%d %b %Y")
-    return f"{name} ({username}) | {status} | joined {joined}"
+from bot.utils import PM, b, i, c, hEsc as _esc
 
 
 def formatUserDetail(u: dict) -> str:
-    name = u["firstName"]
+    name     = u["firstName"] or "Unknown"
     if u.get("lastName"):
         name += f" {u['lastName']}"
     username = f"@{u['username']}" if u.get("username") else "no username"
-    status = "BANNED" if u["isBanned"] else "Active"
-    joined = datetime.fromtimestamp(u["joinedAt"], tz=IST).strftime("%d %b %Y %H:%M")
+    status   = "BANNED" if u["isBanned"] else "Active"
+    joined   = datetime.fromtimestamp(u["joinedAt"], tz=IST).strftime("%d %b %Y")
+    tests_str = f"{u['testsToday']} / {u['dailyLimit']} today"
     return (
-        f"User Detail\n\n"
-        f"Name     : {name}\n"
-        f"Username : {username}\n"
-        f"ID       : {u['userId']}\n"
-        f"Status   : {status}\n"
-        f"Tests today : {u['testsToday']} / {u['dailyLimit']}\n"
-        f"Joined   : {joined}"
+        f"{b(_esc(name))}  {c(_esc(username))}\n\n"
+        f"ID        {c(str(u['userId']))}\n"
+        f"Status    {c(status)}\n"
+        f"Tests     {c(tests_str)}\n"
+        f"Joined    {c(joined)}"
     )
 
 
@@ -183,26 +180,20 @@ async def cbUsersList(callback: CallbackQuery) -> None:
     if not isAdmin(callback.from_user.id):
         await callback.answer("Access denied.", show_alert=True)
         return
-    page = int(callback.data.split(":")[2])
-    total = db.getUserCount()
+    page       = int(callback.data.split(":")[2])
+    total      = db.getUserCount()
     totalPages = max(1, -(-total // USERS_PER_PAGE))
-    users = db.getAllUsers(offset=page * USERS_PER_PAGE, limit=USERS_PER_PAGE)
+    users      = db.getAllUsers(offset=page * USERS_PER_PAGE, limit=USERS_PER_PAGE)
 
     if not users:
-        await callback.message.edit_text(
-            "No users registered yet.",
-            reply_markup=backToAdminKeyboard()
-        )
+        await callback.message.edit_text("No users registered yet.", reply_markup=backToAdminKeyboard())
         await callback.answer()
         return
 
-    lines = [f"Users  (page {page + 1}/{totalPages})\n"]
-    for u in users:
-        lines.append(formatUserRow(u))
-
     await callback.message.edit_text(
-        "\n".join(lines),
-        reply_markup=usersListKeyboard(page, totalPages)
+        f"{b('Users')}  {c(f'{total} total  page {page + 1}/{totalPages}')}\n\n{i('Tap a user to manage them.')}",
+        reply_markup=usersListKeyboard(page, totalPages, users),
+        parse_mode=PM
     )
     await callback.answer()
 
@@ -219,13 +210,14 @@ async def cbUserDetail(callback: CallbackQuery) -> None:
         await callback.answer("Access denied.", show_alert=True)
         return
     userId = int(callback.data.split(":")[2])
-    u = db.getUser(userId)
+    u      = db.getUser(userId)
     if not u:
         await callback.answer("User not found.", show_alert=True)
         return
     await callback.message.edit_text(
         formatUserDetail(u),
-        reply_markup=userActionKeyboard(userId, bool(u["isBanned"]))
+        reply_markup=userActionKeyboard(userId, bool(u["isBanned"])),
+        parse_mode=PM
     )
     await callback.answer()
 
@@ -253,7 +245,8 @@ async def cbToggleBan(callback: CallbackQuery) -> None:
     u = db.getUser(userId)
     await callback.message.edit_text(
         formatUserDetail(u),
-        reply_markup=userActionKeyboard(userId, bool(u["isBanned"]))
+        reply_markup=userActionKeyboard(userId, bool(u["isBanned"])),
+        parse_mode=PM
     )
 
 
@@ -270,8 +263,8 @@ async def cbSetLimit(callback: CallbackQuery, state: FSMContext) -> None:
     await state.set_state(AdminStates.waitingSetLimit)
     await state.update_data(targetUserId=userId)
     await callback.message.edit_text(
-        f"Set Daily Limit\n\nEnter the new daily test limit for user {userId}.\n"
-        "Enter a number between 0 and 999."
+        f"{b('Set Daily Limit')}\n\nEnter new limit for user {c(str(userId))}.\nNumber between {c('0')} and {c('999')}.",
+        parse_mode=PM
     )
     await callback.answer()
 
@@ -288,14 +281,15 @@ async def handleSetLimit(message: Message, state: FSMContext) -> None:
     except ValueError:
         await message.answer("Enter a number between 0 and 999.")
         return
-    data = await state.get_data()
+    data         = await state.get_data()
     targetUserId = data["targetUserId"]
     db.setDailyLimit(targetUserId, limit)
     await state.clear()
     u = db.getUser(targetUserId)
     await message.answer(
-        f"Limit updated.\n\nUser {targetUserId} now has a daily limit of {limit}.",
-        reply_markup=userActionKeyboard(targetUserId, bool(u["isBanned"]))
+        formatUserDetail(u),
+        reply_markup=userActionKeyboard(targetUserId, bool(u["isBanned"])),
+        parse_mode=PM
     )
 
 
@@ -314,7 +308,8 @@ async def cbResetUser(callback: CallbackQuery) -> None:
     u = db.getUser(userId)
     await callback.message.edit_text(
         formatUserDetail(u),
-        reply_markup=userActionKeyboard(userId, bool(u["isBanned"]))
+        reply_markup=userActionKeyboard(userId, bool(u["isBanned"])),
+        parse_mode=PM
     )
 
 
@@ -328,8 +323,9 @@ async def cbResetAll(callback: CallbackQuery) -> None:
         await callback.answer("Access denied.", show_alert=True)
         return
     await callback.message.edit_text(
-        "Reset All Limits\n\nThis will reset today's test count for every user.\nAre you sure?",
-        reply_markup=confirmResetAllKeyboard()
+        f"{b('Reset All Limits')}\n\nThis will reset today's test count for every user.\nAre you sure?",
+        reply_markup=confirmResetAllKeyboard(),
+        parse_mode=PM
     )
     await callback.answer()
 
@@ -358,8 +354,8 @@ async def cbGlobalLimit(callback: CallbackQuery, state: FSMContext) -> None:
         return
     await state.set_state(AdminStates.waitingGlobalLimit)
     await callback.message.edit_text(
-        "Set Global Daily Limit\n\n"
-        "Enter a number. This will update the daily limit for every user."
+        f"{b('Set Global Daily Limit')}\n\nEnter a number. This will update the daily limit for every user."
+        ,parse_mode=PM
     )
     await callback.answer()
 
@@ -379,8 +375,9 @@ async def handleGlobalLimit(message: Message, state: FSMContext) -> None:
     db.setGlobalDailyLimit(limit)
     await state.clear()
     await message.answer(
-        f"Global limit updated. All users now have a daily limit of {limit}.",
-        reply_markup=backToAdminKeyboard()
+        f"Global limit updated. All users now have a daily limit of {c(str(limit))}.",
+        reply_markup=backToAdminKeyboard(),
+        parse_mode=PM
     )
 
 
@@ -393,18 +390,17 @@ async def cbUserHistory(callback: CallbackQuery) -> None:
     if not isAdmin(callback.from_user.id):
         await callback.answer("Access denied.", show_alert=True)
         return
-    userId = int(callback.data.split(":")[2])
+    userId  = int(callback.data.split(":")[2])
     history = db.getUserHistory(userId, limit=10)
     if not history:
         await callback.answer("No test history for this user.", show_alert=True)
         return
 
-    lines = [f"Test History  (last {len(history)})\n"]
+    lines = [f"{b(f'Test History')}  {c(f'last {len(history)}')}\n"]
     for h in history:
-        from datetime import datetime
         dt = datetime.fromtimestamp(h["startedAt"], tz=IST).strftime("%d %b %H:%M")
         lines.append(
-            f"{dt}  {h['phone']}  {h['duration']}s  "
+            f"{c(dt)}  {h['phone']}  {h['duration']}s  "
             f"OTP {h['otpHits']}  REQ {h['totalReqs']}"
         )
 
@@ -412,7 +408,8 @@ async def cbUserHistory(callback: CallbackQuery) -> None:
     builder.button(text="Back", callback_data=f"adm:user:{userId}")
     await callback.message.edit_text(
         "\n".join(lines),
-        reply_markup=builder.as_markup()
+        reply_markup=builder.as_markup(),
+        parse_mode=PM
     )
     await callback.answer()
 

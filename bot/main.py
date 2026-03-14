@@ -22,12 +22,10 @@ logger = logging.getLogger(__name__)
 
 async def main() -> None:
     bot = Bot(token=BOT_TOKEN)
-    dp = Dispatcher(storage=MemoryStorage())
+    dp  = Dispatcher(storage=MemoryStorage())
 
-    # Middleware - runs on every incoming update
     dp.update.middleware(AuthMiddleware())
 
-    # Routers
     dp.include_router(start.router)
     dp.include_router(test_flow.router)
     dp.include_router(dashboard.router)
@@ -35,11 +33,10 @@ async def main() -> None:
     dp.include_router(admin_apis.router)
     dp.include_router(admin_proxy.router)
 
-    # Background scheduler for midnight IST reset
-    asyncio.create_task(midnightResetLoop())
-
     logger.info("Bot starting...")
     try:
+        # Start scheduler inside the running loop
+        asyncio.get_event_loop().create_task(midnightResetLoop())
         await dp.start_polling(bot, allowed_updates=["message", "callback_query"])
     finally:
         await bot.session.close()

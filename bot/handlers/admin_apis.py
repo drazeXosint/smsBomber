@@ -28,6 +28,9 @@ def isAdmin(userId: int) -> bool:
     return userId == ADMIN_ID
 
 
+from bot.utils import PM, b, i, c, hEsc as _esc
+
+
 class ApiAdminStates(StatesGroup):
     waitingApiJson     = State()
     waitingConfirm     = State()
@@ -101,20 +104,20 @@ def cleanCfg(api: dict) -> dict:
 
 
 def formatDetail(cfg: dict) -> str:
-    lines = ["API Detail\n"]
-    lines.append(f"Name    : {cfg['name']}")
-    lines.append(f"Method  : {cfg['method']}")
-    lines.append(f"URL     : {cfg['url']}")
+    lines = [f"{b('API Detail')}\n"]
+    lines.append(f"Name    {c(_esc(cfg['name']))}")
+    lines.append(f"Method  {c(cfg['method'])}")
+    lines.append(f"URL     {c(_esc(cfg['url']))}")
     if cfg.get("headers"):
-        lines.append(f"Headers : {len(cfg['headers'])} fields")
+        lines.append(f"Headers {c(str(len(cfg['headers'])))} fields")
     if cfg.get("json"):
-        lines.append(f"Body    : JSON  {len(cfg['json'])} fields")
+        lines.append(f"Body    {c('JSON')}  {c(str(len(cfg['json'])))} fields")
     elif cfg.get("data"):
-        lines.append(f"Body    : Form  {len(cfg['data'])} fields")
+        lines.append(f"Body    {c('Form')}  {c(str(len(cfg['data'])))} fields")
     if cfg.get("params"):
-        lines.append(f"Params  : {len(cfg['params'])} fields")
+        lines.append(f"Params  {c(str(len(cfg['params'])))} fields")
     if cfg.get("cookies"):
-        lines.append(f"Cookies : {len(cfg['cookies'])} fields")
+        lines.append(f"Cookies {c(str(len(cfg['cookies'])))} fields")
     return "\n".join(lines)
 
 
@@ -134,7 +137,7 @@ def apiManagerMenuKeyboard() -> InlineKeyboardMarkup:
 
 def apiListKeyboard(page: int, totalPages: int, pageApis: list, pageStart: int) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
-    for i, api in enumerate(pageApis):
+    for idx2, api in enumerate(pageApis):
         dbId  = api.get("_dbId")
         label = api["name"]
         if api.get("_isOverride"):
@@ -142,7 +145,7 @@ def apiListKeyboard(page: int, totalPages: int, pageApis: list, pageStart: int) 
         elif not dbId:
             label += " [base]"
         # callback: db id or global index — both guaranteed short
-        cb = f"aapi:ddb:{dbId}" if dbId else f"aapi:didx:{pageStart + i}"
+        cb = f"aapi:ddb:{dbId}" if dbId else f"aapi:didx:{pageStart + idx2}"
         builder.button(text=label, callback_data=cb)
     if page > 0:
         builder.button(text="Prev", callback_data=f"aapi:list:{page - 1}")
@@ -203,10 +206,11 @@ async def cbApiMenu(callback: CallbackQuery, state: FSMContext) -> None:
     overrides = sum(1 for a in allApis if a.get("_isOverride"))
     base      = len(allApis) - custom - overrides
     await callback.message.edit_text(
-        f"API Manager\n\n"
-        f"Total : {len(allApis)}\n"
-        f"Base  : {base}  |  Edited : {overrides}  |  Custom : {custom}",
-        reply_markup=apiManagerMenuKeyboard()
+        f"{b('API Manager')}\n\n"
+        f"Total  {c(str(len(allApis)))}\n"
+        f"Base   {c(str(base))}  Edited  {c(str(overrides))}  Custom  {c(str(custom))}",
+        reply_markup=apiManagerMenuKeyboard(),
+        parse_mode=PM
     )
     await callback.answer()
 
@@ -228,15 +232,16 @@ async def cbListApis(callback: CallbackQuery) -> None:
     start      = page * APIS_PER_PAGE
     pageApis   = allApis[start:start + APIS_PER_PAGE]
 
-    lines = [f"APIs  ({total} total  |  page {page + 1}/{totalPages})\n"]
-    for i, api in enumerate(pageApis, start=start + 1):
+    lines = [f"{b('APIs')}  {c(f'{total} total  page {page+1}/{totalPages}')}\n"]
+    for idx2, api in enumerate(pageApis, start=start + 1):
         tag = " [edited]" if api.get("_isOverride") else (" [base]" if not api.get("_dbId") else " [custom]")
         url = api["url"][:48] + "..." if len(api["url"]) > 48 else api["url"]
-        lines.append(f"{i}. {api['name']}  {api['method']}{tag}\n   {url}")
+        lines.append(f"{idx2}. {_esc(api['name'])}  {api['method']}{tag}\n   {_esc(url)}")
 
     await callback.message.edit_text(
         "\n".join(lines),
-        reply_markup=apiListKeyboard(page, totalPages, pageApis, start)
+        reply_markup=apiListKeyboard(page, totalPages, pageApis, start),
+        parse_mode=PM
     )
     await callback.answer()
 
@@ -260,7 +265,8 @@ async def cbDetailDb(callback: CallbackQuery) -> None:
     cfg = json.loads(row["configJson"])
     await callback.message.edit_text(
         formatDetail(cfg),
-        reply_markup=apiDetailKeyboard(dbId=dbId)
+        reply_markup=apiDetailKeyboard(dbId=dbId),
+        parse_mode=PM
     )
     await callback.answer()
 
@@ -284,7 +290,8 @@ async def cbDetailIdx(callback: CallbackQuery) -> None:
     api = allApis[idx]
     await callback.message.edit_text(
         formatDetail(api),
-        reply_markup=apiDetailKeyboard(dbId=None, globalIdx=idx)
+        reply_markup=apiDetailKeyboard(dbId=None, globalIdx=idx),
+        parse_mode=PM
     )
     await callback.answer()
 
@@ -317,8 +324,9 @@ async def cbCopyBase(callback: CallbackQuery, state: FSMContext) -> None:
     await state.set_state(ApiAdminStates.waitingEditJson)
     await state.update_data(editApiId=dbId)
     await callback.message.edit_text(
-        f"Copied to bot. Paste updated JSON to edit {cfg['name']}.\n\n"
-        f"Current:\n{json.dumps(cfg, indent=2)}"
+        f"{b('Copied to bot.')} Paste updated JSON to edit {_esc(cfg['name'])}.\n\n"
+        f"Current:\n<pre>{_esc(json.dumps(cfg, indent=2))}</pre>",
+        parse_mode=PM
     )
     await callback.answer()
 
@@ -342,7 +350,8 @@ async def cbRename(callback: CallbackQuery, state: FSMContext) -> None:
     await state.set_state(ApiAdminStates.waitingRename)
     await state.update_data(renameApiId=dbId)
     await callback.message.edit_text(
-        f"Rename: {row['name']}\n\nType the new name."
+        f"{b('Rename')}  {c(_esc(row['name']))}\n\nType the new name.",
+        parse_mode=PM
     )
     await callback.answer()
 
@@ -369,7 +378,7 @@ async def handleRename(message: Message, state: FSMContext) -> None:
     cfg["name"] = newName
     db.updateCustomApi(dbId, name=newName, method=cfg["method"], url=cfg["url"], configJson=json.dumps(cfg))
     await state.clear()
-    await message.answer(f"Renamed to: {newName}", reply_markup=apiDetailKeyboard(dbId=dbId))
+    await message.answer(f"Renamed to: {c(_esc(newName))}", reply_markup=apiDetailKeyboard(dbId=dbId), parse_mode=PM)
 
 
 # ---------------------------------------------------------------------------
@@ -393,7 +402,8 @@ async def cbEditApi(callback: CallbackQuery, state: FSMContext) -> None:
 
     cfg = json.loads(row["configJson"])
     await callback.message.edit_text(
-        f"Edit: {cfg['name']}\n\nPaste updated JSON.\n\nCurrent:\n{json.dumps(cfg, indent=2)}"
+        f"{b('Edit')}  {c(_esc(cfg['name']))}\n\nPaste updated JSON.\n\nCurrent:\n<pre>{_esc(json.dumps(cfg, indent=2))}</pre>",
+        parse_mode=PM
     )
     await callback.answer()
 
@@ -418,7 +428,7 @@ async def handleEditJson(message: Message, state: FSMContext) -> None:
     builder.button(text="Save",   callback_data="aapi:confirm_edit")
     builder.button(text="Cancel", callback_data=f"aapi:ddb:{dbId}")
     builder.adjust(2)
-    await message.answer(f"{formatDetail(cfg)}\n\nSave?", reply_markup=builder.as_markup())
+    await message.answer(f"{formatDetail(cfg)}\n\nSave?", reply_markup=builder.as_markup(), parse_mode=PM)
 
 
 @router.callback_query(F.data == "aapi:confirm_edit", StateFilter(ApiAdminStates.waitingEditConfirm))
@@ -440,8 +450,9 @@ async def cbConfirmEdit(callback: CallbackQuery, state: FSMContext) -> None:
     db.updateCustomApi(dbId, name=cfg["name"], method=cfg["method"], url=cfg["url"], configJson=cfgJson)
     await state.clear()
     await callback.message.edit_text(
-        f"Saved.  {cfg['name']} ({cfg['method']}) updated.",
-        reply_markup=apiDetailKeyboard(dbId=dbId)
+        f"{b('Saved.')}  {_esc(cfg['name'])} ({cfg['method']}) updated.",
+        reply_markup=apiDetailKeyboard(dbId=dbId),
+        parse_mode=PM
     )
     await callback.answer("Saved.")
 
@@ -464,7 +475,7 @@ async def cbDeleteApi(callback: CallbackQuery) -> None:
 
     db.deleteCustomApi(dbId)
     await callback.answer(f"Deleted: {row['name']}")
-    await callback.message.edit_text("Deleted.", reply_markup=backToApiMenuKeyboard())
+    await callback.message.edit_text(f"{b('Deleted.')} API removed.", reply_markup=backToApiMenuKeyboard(), parse_mode=PM)
 
 
 # ---------------------------------------------------------------------------
@@ -477,13 +488,14 @@ async def cbAddApi(callback: CallbackQuery, state: FSMContext) -> None:
         await callback.answer("Access denied.", show_alert=True)
         return
     await state.set_state(ApiAdminStates.waitingApiJson)
+    example = '{"name": "MyApp", "method": "POST", "url": "https://api.example.com/otp", "headers": {"content-type": "application/json"}, "json": {"phone": "{phone}"}}'
     await callback.message.edit_text(
-        "Add API\n\n"
-        "Paste full JSON config.\n"
-        "Required: name, method, url\n"
-        "Optional: headers, json, data, params, cookies\n\n"
-        'Example:\n{"name": "MyApp", "method": "POST", "url": "https://api.example.com/otp", '
-        '"headers": {"content-type": "application/json"}, "json": {"phone": "{phone}"}}'
+        f"{b('Add API')}\n\n"
+        f"Paste full JSON config.\n"
+        f"Required: name, method, url\n"
+        f"Optional: headers, json, data, params, cookies\n\n"
+        f"Example:\n<pre>{_esc(example)}</pre>",
+        parse_mode=PM
     )
     await callback.answer()
 
@@ -501,7 +513,7 @@ async def handleApiJson(message: Message, state: FSMContext) -> None:
 
     await state.update_data(pendingApiJson=json.dumps(cfg), pendingApiConfig=cfg)
     await state.set_state(ApiAdminStates.waitingConfirm)
-    await message.answer(f"{formatDetail(cfg)}\n\nSave?", reply_markup=confirmKeyboard("aapi:confirm_save"))
+    await message.answer(f"{formatDetail(cfg)}\n\nSave?", reply_markup=confirmKeyboard("aapi:confirm_save"), parse_mode=PM)
 
 
 @router.callback_query(F.data == "aapi:confirm_save", StateFilter(ApiAdminStates.waitingConfirm))
@@ -522,8 +534,9 @@ async def cbConfirmSave(callback: CallbackQuery, state: FSMContext) -> None:
     await state.clear()
     total = len(getMergedTagged())
     await callback.message.edit_text(
-        f"Saved.  {cfg['name']} added.  Total APIs: {total}",
-        reply_markup=backToApiMenuKeyboard()
+        f"{b('Saved.')}  {_esc(cfg['name'])} added.  Total APIs: {c(str(total))}",
+        reply_markup=backToApiMenuKeyboard(),
+        parse_mode=PM
     )
     await callback.answer("Saved.")
 
@@ -548,7 +561,8 @@ async def cbTestOne(callback: CallbackQuery, state: FSMContext) -> None:
     await state.set_state(ApiAdminStates.waitingTestPhone)
     await state.update_data(testApiDbId=dbId, testApiIdx=None)
     await callback.message.edit_text(
-        f"Test: {api['name']}\n{api['method']}  {api['url']}\n\nEnter a 10-digit phone number."
+        f"{b('Test')}  {_esc(api['name'])}\n{c(api['method'])}  {_esc(api['url'])}\n\nEnter a 10-digit phone number.",
+        parse_mode=PM
     )
     await callback.answer()
 
@@ -569,7 +583,8 @@ async def cbTestOneIdx(callback: CallbackQuery, state: FSMContext) -> None:
     await state.set_state(ApiAdminStates.waitingTestPhone)
     await state.update_data(testApiDbId=None, testApiIdx=idx)
     await callback.message.edit_text(
-        f"Test: {api['name']}\n{api['method']}  {api['url']}\n\nEnter a 10-digit phone number."
+        f"{b('Test')}  {_esc(api['name'])}\n{c(api['method'])}  {_esc(api['url'])}\n\nEnter a 10-digit phone number.",
+        parse_mode=PM
     )
     await callback.answer()
 
@@ -603,13 +618,14 @@ async def handleTestPhone(message: Message, state: FSMContext) -> None:
 
     await state.clear()
     cfg     = cleanCfg(api)
-    waiting = await message.answer(f"Testing {api['name']}...")
+    waiting = await message.answer(f"Testing {_esc(api['name'])}...", parse_mode=PM)
     result  = await testSingleApi(cfg, phone)
 
     if not result["ok"]:
         await waiting.edit_text(
-            f"Test Failed\n\nAPI   : {api['name']}\nError : {result['error']}",
-            reply_markup=backToApiMenuKeyboard()
+            f"{b('Test Failed')}\n\nAPI   {_esc(api['name'])}\nError {_esc(result['error'])}",
+            reply_markup=backToApiMenuKeyboard(),
+            parse_mode=PM
         )
         return
 
@@ -645,7 +661,8 @@ async def cbHealthCheck(callback: CallbackQuery) -> None:
     phone   = randomPhone()
     total   = len(allApis)
     waiting = await callback.message.edit_text(
-        f"Health Check\n\nTesting {total} APIs with random number {phone}...\nPlease wait."
+        f"{b('Health Check')}\n\n{c(f'Testing {total} APIs...')}\n{i('Please wait...')}",
+        parse_mode=PM
     )
     await callback.answer()
 
@@ -659,74 +676,313 @@ async def cbHealthCheck(callback: CallbackQuery) -> None:
 
     results = await asyncio.gather(*[checkOne(a) for a in allApis])
 
-    def sortKey(r):
-        res = r["result"]
-        if not res["ok"] or res.get("status") is None:
-            return 3
-        if res["status"] == 429:
-            return 1
-        if res["status"] < 300:
-            return 0
-        return 2
-
-    results = sorted(results, key=sortKey)
-
-    ok_count   = sum(1 for r in results if r["result"].get("ok") and 0 < (r["result"].get("status") or 0) < 300)
-    rl_count   = sum(1 for r in results if r["result"].get("status") == 429)
-    dead_count = total - ok_count - rl_count
-
-    lines = [
-        f"Health Check\nPhone: {phone}  |  APIs: {total}",
-        f"OK: {ok_count}  Rate limited: {rl_count}  Dead: {dead_count}\n",
-    ]
+    # Categorize
+    ok_list   = []
+    rl_list   = []
+    dead_list = []
+    err_list  = []
 
     for r in results:
-        res     = r["result"]
-        name    = r["name"]
-        method  = r["method"]
-        if not res["ok"]:
-            err  = (res.get("error") or "timeout")[:30]
-            line = f"DEAD    {name} ({method})  {err}"
+        res    = r["result"]
+        status = res.get("status")
+        if not res["ok"] or status is None:
+            dead_list.append(r)
+        elif status == 429:
+            rl_list.append(r)
+        elif status < 300:
+            ok_list.append(r)
         else:
-            status  = res.get("status")
-            latency = res.get("latencyMs", 0)
-            snippet = (res.get("snippet") or "")[:80]
-            lbl     = statusLabel(status, None, latency)
-            line    = f"{lbl}    {name} ({method})"
-            if snippet:
-                line += f"\n  {snippet}"
-        lines.append(line)
+            err_list.append(r)
 
-    # Chunk into Telegram-safe messages
-    chunks  = []
-    current = []
-    chars   = 0
-    for line in lines:
-        if chars + len(line) + 1 > 3800 and current:
-            chunks.append("\n".join(current))
-            current = [line]
-            chars   = len(line)
-        else:
-            current.append(line)
-            chars += len(line) + 1
-    if current:
-        chunks.append("\n".join(current))
+    # Store results in state for browsing
+    import json as _json
+    storageKey = f"hc_{callback.from_user.id}"
+    _healthCheckCache[storageKey] = {
+        "phone": phone,
+        "ok":    ok_list,
+        "rl":    rl_list,
+        "dead":  dead_list,
+        "err":   err_list,
+    }
 
     builder = InlineKeyboardBuilder()
-    builder.button(text="API Manager", callback_data="aapi:menu")
+    if ok_list:
+        builder.button(text=f"OK  ({len(ok_list)})",           callback_data=f"aapi:hccat:ok:0")
+    if dead_list:
+        builder.button(text=f"Dead  ({len(dead_list)})",       callback_data=f"aapi:hccat:dead:0")
+    if rl_list:
+        builder.button(text=f"Rate Limited  ({len(rl_list)})", callback_data=f"aapi:hccat:rl:0")
+    if err_list:
+        builder.button(text=f"Errors  ({len(err_list)})",      callback_data=f"aapi:hccat:err:0")
+    builder.button(text="Run Again", callback_data="aapi:health")
+    builder.button(text="Back",      callback_data="aapi:menu")
     builder.adjust(1)
 
-    try:
-        await waiting.edit_text(
-            chunks[0],
-            reply_markup=builder.as_markup() if len(chunks) == 1 else None
-        )
-    except Exception:
-        pass
+    total = len(ok_list) + len(dead_list) + len(rl_list) + len(err_list)
+    await waiting.edit_text(
+        f"{b('Health Check')}\n"
+        f"{c(f'Phone: {phone}')}\n\n"
+        f"OK            {c(str(len(ok_list)))}\n"
+        f"Dead          {c(str(len(dead_list)))}\n"
+        f"Rate limited  {c(str(len(rl_list)))}\n"
+        f"Errors        {c(str(len(err_list)))}\n\n"
+        f"{i('Tap a category to browse.')}",
+        reply_markup=builder.as_markup(),
+        parse_mode=PM
+    )
 
-    for i, chunk in enumerate(chunks[1:], start=2):
-        kb = builder.as_markup() if i == len(chunks) else None
-        try:
-            await waiting.answer(chunk, reply_markup=kb)
-        except Exception:
-            pass
+
+# In-memory cache for health check results (keyed by user id)
+_healthCheckCache: dict = {}
+
+HC_PER_PAGE = 8
+
+
+@router.callback_query(F.data.startswith("aapi:hccat:"))
+async def cbHcCategory(callback: CallbackQuery) -> None:
+    if not isAdmin(callback.from_user.id):
+        await callback.answer("Access denied.", show_alert=True)
+        return
+
+    parts    = callback.data.split(":")
+    cat      = parts[2]
+    page     = int(parts[3])
+    cacheKey = f"hc_{callback.from_user.id}"
+    cache    = _healthCheckCache.get(cacheKey)
+
+    if not cache:
+        await callback.answer("Results expired. Run health check again.", show_alert=True)
+        return
+
+    catMap   = {"ok": cache["ok"], "dead": cache["dead"], "rl": cache["rl"], "err": cache["err"]}
+    catLabel = {"ok": "OK", "dead": "Dead", "rl": "Rate Limited", "err": "Errors"}
+    entries  = catMap.get(cat, [])
+    total    = len(entries)
+    totalPages = max(1, -(-total // HC_PER_PAGE))
+    start    = page * HC_PER_PAGE
+    pageEntries = entries[start:start + HC_PER_PAGE]
+
+    builder = InlineKeyboardBuilder()
+    for n, r in enumerate(pageEntries):
+        globalIdx = start + n
+        builder.button(
+            text=f"{r['name']} ({r['method']})",
+            callback_data=f"aapi:hcresult:{cat}:{globalIdx}"
+        )
+    if page > 0:
+        builder.button(text="Prev", callback_data=f"aapi:hccat:{cat}:{page - 1}")
+    if page < totalPages - 1:
+        builder.button(text="Next", callback_data=f"aapi:hccat:{cat}:{page + 1}")
+    builder.button(text="Back", callback_data="aapi:health_summary")
+    builder.adjust(1)
+
+    await callback.message.edit_text(
+        f"{b(catLabel[cat] + ' APIs')}  {c(str(total) + ' total')}\n\n{i('Tap an API to see its result.')}",
+        reply_markup=builder.as_markup(),
+        parse_mode=PM
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("aapi:hcresult:"))
+async def cbHcResult(callback: CallbackQuery) -> None:
+    if not isAdmin(callback.from_user.id):
+        await callback.answer("Access denied.", show_alert=True)
+        return
+
+    parts    = callback.data.split(":")
+    cat      = parts[2]
+    idx      = int(parts[3])
+    cacheKey = f"hc_{callback.from_user.id}"
+    cache    = _healthCheckCache.get(cacheKey)
+
+    if not cache:
+        await callback.answer("Results expired.", show_alert=True)
+        return
+
+    catMap  = {"ok": cache["ok"], "dead": cache["dead"], "rl": cache["rl"], "err": cache["err"]}
+    entries = catMap.get(cat, [])
+
+    if idx >= len(entries):
+        await callback.answer("Not found.", show_alert=True)
+        return
+
+    r      = entries[idx]
+    res    = r["result"]
+    name   = r["name"]
+    method = r["method"]
+    page   = idx // HC_PER_PAGE
+
+    # Check current skip status
+    isSkipped = db.isApiSkipped(name)
+
+    if not res["ok"] or res.get("status") is None:
+        err  = _esc((res.get("error") or "timeout")[:80])
+        text = (
+            f"{b(_esc(name))}  {c(method)}\n\n"
+            f"Status  {c('DEAD')}\n"
+            f"Error   {c(err)}"
+        )
+    else:
+        status  = res["status"]
+        latency = res.get("latencyMs", 0)
+        snippet = _esc((res.get("snippet") or "(empty)")[:100])
+        if status == 429:
+            lbl = "RATE LIMITED"
+        elif status < 300:
+            lbl = "OK"
+        elif status < 500:
+            lbl = "CLIENT ERR"
+        else:
+            lbl = "SERVER ERR"
+        text = (
+            f"{b(_esc(name))}  {c(method)}\n\n"
+            f"Status   {c(f'{lbl} {status}')}\n"
+            f"Latency  {c(f'{latency}ms')}\n\n"
+            f"{i('Response')}\n{c(snippet)}"
+        )
+
+    skipLabel = "Enable" if isSkipped else "Skip next time"
+    # Encode name safely for callback — use idx instead of name to avoid length issues
+    builder = InlineKeyboardBuilder()
+    if cat in ("dead", "err"):
+        builder.button(text=skipLabel,      callback_data=f"aapi:hcskip:{cat}:{idx}")
+        builder.button(text="Delete API",   callback_data=f"aapi:hcdelete:{cat}:{idx}")
+        builder.button(text="Back",         callback_data=f"aapi:hccat:{cat}:{page}")
+        builder.adjust(2, 1)
+    else:
+        builder.button(text=skipLabel,      callback_data=f"aapi:hcskip:{cat}:{idx}")
+        builder.button(text="Back",         callback_data=f"aapi:hccat:{cat}:{page}")
+        builder.adjust(1)
+
+    await callback.message.edit_text(text, reply_markup=builder.as_markup(), parse_mode=PM)
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("aapi:hcskip:"))
+async def cbHcSkip(callback: CallbackQuery) -> None:
+    if not isAdmin(callback.from_user.id):
+        await callback.answer("Access denied.", show_alert=True)
+        return
+
+    parts    = callback.data.split(":")
+    cat      = parts[2]
+    idx      = int(parts[3])
+    cacheKey = f"hc_{callback.from_user.id}"
+    cache    = _healthCheckCache.get(cacheKey)
+
+    if not cache:
+        await callback.answer("Results expired.", show_alert=True)
+        return
+
+    catMap  = {"ok": cache["ok"], "dead": cache["dead"], "rl": cache["rl"], "err": cache["err"]}
+    entries = catMap.get(cat, [])
+    if idx >= len(entries):
+        await callback.answer("Not found.", show_alert=True)
+        return
+
+    name      = entries[idx]["name"]
+    isSkipped = db.isApiSkipped(name)
+
+    if isSkipped:
+        db.unskipApi(name)
+        await callback.answer(f"Enabled: {name}")
+    else:
+        db.skipApi(name)
+        await callback.answer(f"Will skip: {name}")
+
+    # Refresh result screen
+    await cbHcResult(callback)
+
+
+@router.callback_query(F.data.startswith("aapi:hcdelete:"))
+async def cbHcDelete(callback: CallbackQuery) -> None:
+    if not isAdmin(callback.from_user.id):
+        await callback.answer("Access denied.", show_alert=True)
+        return
+
+    parts    = callback.data.split(":")
+    cat      = parts[2]
+    idx      = int(parts[3])
+    cacheKey = f"hc_{callback.from_user.id}"
+    cache    = _healthCheckCache.get(cacheKey)
+
+    if not cache:
+        await callback.answer("Results expired.", show_alert=True)
+        return
+
+    catMap  = {"ok": cache["ok"], "dead": cache["dead"], "rl": cache["rl"], "err": cache["err"]}
+    entries = catMap.get(cat, [])
+    if idx >= len(entries):
+        await callback.answer("Not found.", show_alert=True)
+        return
+
+    name = entries[idx]["name"]
+
+    # Find the DB id for this API by name
+    allApis = getMergedTagged()
+    api     = next((a for a in allApis if a["name"] == name and a.get("_dbId")), None)
+
+    if not api:
+        await callback.answer("Base APIs cannot be deleted — use Skip instead.", show_alert=True)
+        return
+
+    db.deleteCustomApi(api["_dbId"])
+    # Remove from cache so list refreshes cleanly
+    entries.pop(idx)
+    await callback.answer(f"Deleted: {name}")
+
+    page = idx // HC_PER_PAGE
+    await callback.message.edit_text(
+        f"{b('Deleted')}  {c(_esc(name))}\n\n{i('API removed from the bot.')}",
+        reply_markup=InlineKeyboardBuilder().button(
+            text="Back", callback_data=f"aapi:hccat:{cat}:{page}"
+        ).as_markup(),
+        parse_mode=PM
+    )
+
+
+@router.callback_query(F.data == "aapi:health_summary")
+async def cbHealthSummary(callback: CallbackQuery) -> None:
+    if not isAdmin(callback.from_user.id):
+        await callback.answer("Access denied.", show_alert=True)
+        return
+
+    cacheKey = f"hc_{callback.from_user.id}"
+    cache    = _healthCheckCache.get(cacheKey)
+
+    if not cache:
+        await callback.answer("Results expired. Run health check again.", show_alert=True)
+        return
+
+    ok_list   = cache["ok"]
+    dead_list = cache["dead"]
+    rl_list   = cache["rl"]
+    err_list  = cache["err"]
+    phone     = cache["phone"]
+
+    builder = InlineKeyboardBuilder()
+    if ok_list:
+        builder.button(text=f"OK  ({len(ok_list)})",           callback_data="aapi:hccat:ok:0")
+    if dead_list:
+        builder.button(text=f"Dead  ({len(dead_list)})",       callback_data="aapi:hccat:dead:0")
+    if rl_list:
+        builder.button(text=f"Rate Limited  ({len(rl_list)})", callback_data="aapi:hccat:rl:0")
+    if err_list:
+        builder.button(text=f"Errors  ({len(err_list)})",      callback_data="aapi:hccat:err:0")
+    builder.button(text="Run Again", callback_data="aapi:health")
+    builder.button(text="Back",      callback_data="aapi:menu")
+    builder.adjust(2, 2, 2)
+
+    await callback.message.edit_text(
+        f"{b('Health Check')}\n"
+        f"{c(f'Phone: {phone}')}\n\n"
+        f"OK            {c(str(len(ok_list)))}\n"
+        f"Dead          {c(str(len(dead_list)))}\n"
+        f"Rate limited  {c(str(len(rl_list)))}\n"
+        f"Errors        {c(str(len(err_list)))}\n\n"
+        f"{i('Tap a category to browse.')}",
+        reply_markup=builder.as_markup(),
+        parse_mode=PM
+    )
+    await callback.answer()

@@ -3,25 +3,21 @@ from __future__ import annotations
 import asyncio
 from typing import Dict, Optional
 
-from aiogram import Router, F # type: ignore
-from aiogram.filters import StateFilter # type: ignore
-from aiogram.fsm.context import FSMContext # type: ignore
-from aiogram.fsm.state import State, StatesGroup # type: ignore
-from aiogram.types import Message, CallbackQuery # type: ignore
+from aiogram import Router, F
+from aiogram.filters import StateFilter
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
+from aiogram.types import Message, CallbackQuery
 
 from bot.keyboards.menus import (
-    durationKeyboard,
-    workersKeyboard,
-    proxyKeyboard,
-    confirmKeyboard,
-    runningKeyboard,
-    finishedKeyboard,
-    mainMenuKeyboard,
+    durationKeyboard, workersKeyboard, proxyKeyboard,
+    confirmKeyboard, runningKeyboard, finishedKeyboard, mainMenuKeyboard,
 )
 from bot.services.tester_runner import TesterRunner, validateProxies
 from bot.services.proxy_manager import proxyManager
 from bot.services.database import db
 from bot.config import DASHBOARD_UPDATE_INTERVAL, ADMIN_ID, PROTECTED_NUMBER
+from bot.utils import PM, b, i, c, hEsc
 
 import random
 
@@ -41,23 +37,22 @@ PROTECTED_RESPONSES = [
 
 
 class TestWizard(StatesGroup):
-    phone = State()
-    duration = State()
+    phone          = State()
+    duration       = State()
     durationCustom = State()
-    workers = State()
-    workersCustom = State()
-    proxy = State()
-    proxyChecking = State()
-    confirm = State()
-    running = State()
+    workers        = State()
+    workersCustom  = State()
+    proxy          = State()
+    proxyChecking  = State()
+    confirm        = State()
+    running        = State()
 
 
 def formatDuration(seconds: int) -> str:
     if seconds < 60:
         return f"{seconds}s"
     if seconds < 3600:
-        m = seconds // 60
-        s = seconds % 60
+        m, s = seconds // 60, seconds % 60
         return f"{m}m {s}s" if s else f"{m}m"
     h = seconds // 3600
     m = (seconds % 3600) // 60
@@ -66,12 +61,9 @@ def formatDuration(seconds: int) -> str:
 
 def parseTime(t: str) -> Optional[int]:
     try:
-        if t.endswith("s"):
-            return int(t[:-1])
-        if t.endswith("m"):
-            return int(t[:-1]) * 60
-        if t.endswith("h"):
-            return int(t[:-1]) * 3600
+        if t.endswith("s"): return int(t[:-1])
+        if t.endswith("m"): return int(t[:-1]) * 60
+        if t.endswith("h"): return int(t[:-1]) * 3600
         return int(t)
     except (ValueError, AttributeError):
         return None
@@ -80,69 +72,91 @@ def parseTime(t: str) -> Optional[int]:
 def buildConfirmText(data: dict, proxyInfo: str = "") -> str:
     proxyLabel = proxyInfo if proxyInfo else ("Proxy file" if data.get("useProxy") else "None")
     return (
-        "Test Configuration\n\n"
-        f"Phone    : {data['phone']}\n"
-        f"Duration : {formatDuration(data['duration'])}\n"
-        f"Workers  : {data['workers']}\n"
-        f"Proxy    : {proxyLabel}\n\n"
-        "Confirm to launch."
+        f"{b('Confirm Test')}\n\n"
+        f"Phone     {c(data['phone'])}\n"
+        f"Duration  {c(formatDuration(data['duration']))}\n"
+        f"Workers   {c(str(data['workers']))}\n"
+        f"Proxy     {c(proxyLabel)}\n\n"
+        f"{i('Ready to launch.')}"
     )
 
 
 def buildDashboardText(snap: dict, phone: str, duration: int) -> str:
     elapsed = snap["elapsed"]
-    remaining = max(0, duration - elapsed)
 
-    lines = []
+    lines      = []
+    rl_count   = 0
+    dead_count = 0
     for name, s in snap["perApi"].items():
-        if s["success"] > 0 or s["fail"] > 0 or s["otp"] > 0:
+        if s.get("status") == "ratelimited":
+            rl_count += 1
+        elif s.get("status") == "dead":
+            dead_count += 1
+        elif s.get("requests", 0) > 0:
             lines.append(
-                f"{name}  OK {s['success']}  FAIL {s['fail']}  OTP {s['otp']}  {s['avgMs']}ms"
+                f"<code>{hEsc(name[:18]):<18}</code>  "
+                f"{s['requests']}req  {s.get('confirmed',0)}otp  {s['avgMs']}ms"
             )
 
     if not lines:
-        apiBlock = "Waiting for responses..."
+        apiBlock = i("Waiting for responses...")
     else:
-        apiBlock = "\n".join(lines[:15])
-        if len(lines) > 15:
-            apiBlock += f"\n... and {len(lines) - 15} more"
+        apiBlock = "\n".join(lines[:12])
+        if len(lines) > 12:
+            apiBlock += f"\n{i(f'+{len(lines)-12} more')}"
+
+    bar_total  = 18
+    bar_filled = int(bar_total * min(elapsed / duration, 1)) if duration > 0 else 0
+    bar        = "█" * bar_filled + "░" * (bar_total - bar_filled)
+
+    status_bits = []
+    if rl_count:   status_bits.append(f"RL {c(str(rl_count))}")
+    if dead_count: status_bits.append(f"Dead {c(str(dead_count))}")
+    status_line = "  ·  " + "  ".join(status_bits) if status_bits else ""
+
+    totalReqs = snap.get("totalReqs", snap.get("total", 0))
+    confirmed = snap.get("confirmed", snap.get("otpSent", 0))
+    responses = snap.get("responses", 0)
 
     return (
-        "Running Test\n\n"
-        f"Target    : {phone}\n"
-        f"Elapsed   : {formatDuration(int(elapsed))}   Remaining : {formatDuration(int(remaining))}\n\n"
-        f"Requests  : {snap['total']}\n"
-        f"OTP sent  : {snap['otpSent']}\n"
-        f"Errors    : {snap['errors']}\n"
-        f"Req / sec : {snap['rps']}\n\n"
-        "Per-API\n"
-        f"{apiBlock}"
+        f"{b('Test Running')}  {c(phone)}\n"
+        f"<code>{bar}</code>  {c(f'{int(elapsed)}s / {duration}s')}\n\n"
+        f"Requests   {c(str(totalReqs))}  ·  RPS {c(str(snap['rps']))}{status_line}\n"
+        f"Confirmed  {c(str(confirmed))}  ·  2xx {c(str(responses))}\n"
+        f"Errors     {c(str(snap['errors']))}\n\n"
+        f"{b('APIs')}\n{apiBlock}"
     )
 
 
 def buildSummaryText(snap: dict, phone: str) -> str:
     sortedApis = sorted(
         snap["perApi"].items(),
-        key=lambda x: (x[1]["otp"], x[1]["success"]),
+        key=lambda x: (x[1].get("confirmed", 0), x[1].get("responses", 0)),
         reverse=True,
     )
     topLines = []
-    for name, s in sortedApis[:5]:
-        if s["success"] > 0 or s["otp"] > 0:
-            topLines.append(f"{name}  OTP {s['otp']}  OK {s['success']}  FAIL {s['fail']}")
+    for name, s in sortedApis[:6]:
+        if s.get("requests", 0) > 0:
+            topLines.append(
+                f"<code>{hEsc(name[:18]):<18}</code>  "
+                f"{s.get('confirmed',0)}otp  {s.get('responses',0)}ok  {s['requests']}req"
+            )
 
-    topBlock = "\n".join(topLines) if topLines else "No successful responses recorded."
+    topBlock  = "\n".join(topLines) if topLines else i("No successful responses.")
+    elapsed   = int(snap["elapsed"])
+    totalReqs = snap.get("totalReqs", snap.get("total", 0))
+    confirmed = snap.get("confirmed", snap.get("otpSent", 0))
+    responses = snap.get("responses", 0)
 
     return (
-        "Test Results\n\n"
-        f"Target    : {phone}\n"
-        f"Duration  : {formatDuration(int(snap['elapsed']))}\n\n"
-        f"Requests  : {snap['total']}\n"
-        f"OTP hits  : {snap['otpSent']}\n"
-        f"Errors    : {snap['errors']}\n"
-        f"Req / sec : {snap['rps']}\n\n"
-        "Top APIs\n"
-        f"{topBlock}"
+        f"{b('Test Complete')}  {c(phone)}\n\n"
+        f"Duration   {c(formatDuration(elapsed))}\n"
+        f"Requests   {c(str(totalReqs))}\n"
+        f"Confirmed  {c(str(confirmed))}\n"
+        f"2xx Total  {c(str(responses))}\n"
+        f"Errors     {c(str(snap['errors']))}\n"
+        f"Req/sec    {c(str(snap['rps']))}\n\n"
+        f"{b('Top APIs')}\n{topBlock}"
     )
 
 
@@ -157,24 +171,24 @@ async def dashboardLoop(
     lastText = ""
     while runner.isRunning:
         await asyncio.sleep(DASHBOARD_UPDATE_INTERVAL)
-        snap = runner.stats.snapshot()
+        snap    = runner.stats.snapshot()
         newText = buildDashboardText(snap, phone, duration)
         if newText != lastText:
             try:
-                await message.edit_text(newText, reply_markup=runningKeyboard())
+                await message.edit_text(newText, reply_markup=runningKeyboard(), parse_mode=PM)
                 lastText = newText
             except Exception:
                 pass
 
     if not summaryShown.get(userId, False):
         summaryShown[userId] = True
-        snap = runner.stats.snapshot()
+        snap    = runner.stats.snapshot()
         _saveHistory(userId, snap)
         summary = buildSummaryText(snap, phone)
         try:
-            await message.edit_text(summary, reply_markup=finishedKeyboard())
+            await message.edit_text(summary, reply_markup=finishedKeyboard(), parse_mode=PM)
         except Exception:
-            await message.answer(summary, reply_markup=finishedKeyboard())
+            await message.answer(summary, reply_markup=finishedKeyboard(), parse_mode=PM)
 
     activeRunners.pop(userId, None)
     dashboardTasks.pop(userId, None)
@@ -189,14 +203,18 @@ def _saveHistory(userId: int, snap: dict) -> None:
         try:
             db.finishTestRecord(
                 recordId=recordId,
-                totalReqs=snap["total"],
-                otpHits=snap["otpSent"],
+                totalReqs=snap.get("totalReqs", snap.get("total", 0)),
+                otpHits=snap.get("confirmed", snap.get("otpSent", 0)),
                 errors=snap["errors"],
                 rps=snap["rps"],
             )
         except Exception:
             pass
 
+
+# ---------------------------------------------------------------------------
+# Handlers
+# ---------------------------------------------------------------------------
 
 @router.callback_query(F.data == "menu:start_test")
 async def cbStartTest(callback: CallbackQuery, state: FSMContext) -> None:
@@ -212,15 +230,16 @@ async def cbStartTest(callback: CallbackQuery, state: FSMContext) -> None:
             await callback.answer("Your account has been restricted.", show_alert=True)
             return
         await callback.answer(
-            f"Daily limit reached. You have used {testsToday}/{dailyLimit} tests today.",
+            f"Daily limit reached. {testsToday}/{dailyLimit} tests used today.",
             show_alert=True
         )
         try:
-            u = db.getUser(userId)
+            u        = db.getUser(userId)
             username = f"@{u['username']}" if u and u.get("username") else str(userId)
             await callback.bot.send_message(
                 ADMIN_ID,
-                f"Limit hit\n\nUser {username} (ID: {userId}) hit their daily limit of {dailyLimit}."
+                f"{b('Limit Hit')}\n\n{hEsc(username)} ({userId}) hit their daily limit of {dailyLimit}.",
+                parse_mode=PM
             )
         except Exception:
             pass
@@ -229,9 +248,8 @@ async def cbStartTest(callback: CallbackQuery, state: FSMContext) -> None:
     await state.clear()
     await state.set_state(TestWizard.phone)
     await callback.message.edit_text(
-        "Start Test\n\n"
-        "Enter the 10-digit mobile number.\n"
-        "Example: 9876543210"
+        f"{b('Start Test')}\n\nEnter the 10-digit mobile number.\n{i('Example: 9876543210')}",
+        parse_mode=PM
     )
     await callback.answer()
 
@@ -242,9 +260,8 @@ async def handlePhone(message: Message, state: FSMContext) -> None:
 
     if not phone.isdigit() or len(phone) != 10:
         await message.answer(
-            "Invalid number.\n\n"
-            "Enter exactly 10 digits with no spaces or symbols.\n"
-            "Example: 9876543210"
+            f"{b('Invalid number')}\n\nEnter exactly 10 digits, no spaces.\n{i('Example: 9876543210')}",
+            parse_mode=PM
         )
         return
 
@@ -253,16 +270,15 @@ async def handlePhone(message: Message, state: FSMContext) -> None:
         return
 
     if db.isPhoneBlacklisted(phone) and message.from_user.id != ADMIN_ID:
-        await message.answer(
-            "That number is not available for testing."
-        )
+        await message.answer("That number is not available for testing.")
         return
 
     await state.update_data(phone=phone)
     await state.set_state(TestWizard.duration)
     await message.answer(
-        "Test Duration\n\nSelect how long the test should run.",
+        f"{b('Test Duration')}\n\nHow long should the test run?",
         reply_markup=durationKeyboard(),
+        parse_mode=PM
     )
 
 
@@ -272,38 +288,40 @@ async def cbDuration(callback: CallbackQuery, state: FSMContext) -> None:
     if value == "custom":
         await state.set_state(TestWizard.durationCustom)
         await callback.message.edit_text(
-            "Custom Duration\n\n"
-            "Enter a number with a unit:\n"
-            "  30s  /  5m  /  1h\n\n"
-            "Minimum: 5s   Maximum: 24h"
+            f"{b('Custom Duration')}\n\n"
+            f"Enter a value with a unit: {c('30s')}  {c('5m')}  {c('1h')}\n\n"
+            f"{i('Min: 5s  ·  Max: 24h')}",
+            reply_markup=backToDurationKeyboard(),
+            parse_mode=PM
         )
         await callback.answer()
         return
     await state.update_data(duration=int(value))
     await state.set_state(TestWizard.workers)
     await callback.message.edit_text(
-        "Sender Workers\n\nSelect the number of concurrent workers.",
+        f"{b('Sender Workers')}\n\nMore workers = more concurrent requests.",
         reply_markup=workersKeyboard(),
+        parse_mode=PM
     )
     await callback.answer()
 
 
 @router.message(StateFilter(TestWizard.durationCustom))
 async def handleDurationCustom(message: Message, state: FSMContext) -> None:
-    raw = (message.text or "").strip()
+    raw     = (message.text or "").strip()
     seconds = parseTime(raw)
     if seconds is None or seconds < 5 or seconds > 86400:
         await message.answer(
-            "Invalid duration.\n\n"
-            "Examples: 30s  /  5m  /  2h\n"
-            "Minimum: 5s   Maximum: 24h"
+            f"{b('Invalid duration')}\n\nExamples: {c('30s')}  {c('5m')}  {c('2h')}\n{i('Min: 5s  Max: 24h')}",
+            parse_mode=PM
         )
         return
     await state.update_data(duration=seconds)
     await state.set_state(TestWizard.workers)
     await message.answer(
-        "Sender Workers\n\nSelect the number of concurrent workers.",
+        f"{b('Sender Workers')}\n\nMore workers = more concurrent requests.",
         reply_markup=workersKeyboard(),
+        parse_mode=PM
     )
 
 
@@ -311,8 +329,9 @@ async def handleDurationCustom(message: Message, state: FSMContext) -> None:
 async def cbBackToDuration(callback: CallbackQuery, state: FSMContext) -> None:
     await state.set_state(TestWizard.duration)
     await callback.message.edit_text(
-        "Test Duration\n\nSelect how long the test should run.",
+        f"{b('Test Duration')}\n\nHow long should the test run?",
         reply_markup=durationKeyboard(),
+        parse_mode=PM
     )
     await callback.answer()
 
@@ -323,7 +342,9 @@ async def cbWorkers(callback: CallbackQuery, state: FSMContext) -> None:
     if value == "custom":
         await state.set_state(TestWizard.workersCustom)
         await callback.message.edit_text(
-            "Custom Workers\n\nEnter a number between 1 and 64."
+            f"{b('Custom Workers')}\n\nEnter a number between {c('1')} and {c('64')}.",
+            reply_markup=backToWorkersKeyboard(),
+            parse_mode=PM
         )
         await callback.answer()
         return
@@ -331,8 +352,9 @@ async def cbWorkers(callback: CallbackQuery, state: FSMContext) -> None:
     await state.set_state(TestWizard.proxy)
     hasProxies = proxyManager.hasProxies()
     await callback.message.edit_text(
-        "Proxy Settings\n\nSelect proxy mode for this test.",
+        f"{b('Proxy Settings')}\n\nUse a proxy for this test?",
         reply_markup=proxyKeyboard(hasProxies),
+        parse_mode=PM
     )
     await callback.answer()
 
@@ -345,14 +367,18 @@ async def handleWorkersCustom(message: Message, state: FSMContext) -> None:
         if not 1 <= workers <= 64:
             raise ValueError
     except ValueError:
-        await message.answer("Enter a whole number between 1 and 64.")
+        await message.answer(
+            f"Enter a whole number between {c('1')} and {c('64')}.",
+            parse_mode=PM
+        )
         return
     await state.update_data(workers=workers)
     await state.set_state(TestWizard.proxy)
     hasProxies = proxyManager.hasProxies()
     await message.answer(
-        "Proxy Settings\n\nSelect proxy mode for this test.",
+        f"{b('Proxy Settings')}\n\nUse a proxy for this test?",
         reply_markup=proxyKeyboard(hasProxies),
+        parse_mode=PM
     )
 
 
@@ -360,8 +386,9 @@ async def handleWorkersCustom(message: Message, state: FSMContext) -> None:
 async def cbBackToWorkers(callback: CallbackQuery, state: FSMContext) -> None:
     await state.set_state(TestWizard.workers)
     await callback.message.edit_text(
-        "Sender Workers\n\nSelect the number of concurrent workers.",
+        f"{b('Sender Workers')}\n\nMore workers = more concurrent requests.",
         reply_markup=workersKeyboard(),
+        parse_mode=PM
     )
     await callback.answer()
 
@@ -374,7 +401,8 @@ async def cbProxy(callback: CallbackQuery, state: FSMContext) -> None:
     if useProxy:
         await state.set_state(TestWizard.proxyChecking)
         statusMsg = await callback.message.edit_text(
-            "Checking Proxies\n\nVerifying proxy list, please wait..."
+            f"{b('Checking Proxies')}\n\n{i('Verifying proxy list, please wait...')}",
+            parse_mode=PM
         )
         await callback.answer()
 
@@ -386,23 +414,24 @@ async def cbProxy(callback: CallbackQuery, state: FSMContext) -> None:
             await statusMsg.edit_text(
                 buildConfirmText(data, proxyInfo="None (no proxies loaded)"),
                 reply_markup=confirmKeyboard(),
+                parse_mode=PM
             )
             return
 
-        working = await validateProxies(allProxies)
-        dead = len(allProxies) - len(working)
+        working  = await validateProxies(allProxies)
+        dead     = len(allProxies) - len(working)
         await state.update_data(workingProxies=working)
-
         proxyInfo = f"{len(working)} working / {dead} dead"
         if not working:
             await state.update_data(useProxy=False)
-            proxyInfo = "None (0 working proxies found)"
+            proxyInfo = "None (0 working proxies)"
 
         data = await state.get_data()
         await state.set_state(TestWizard.confirm)
         await statusMsg.edit_text(
             buildConfirmText(data, proxyInfo=proxyInfo),
             reply_markup=confirmKeyboard(),
+            parse_mode=PM
         )
     else:
         await state.set_state(TestWizard.confirm)
@@ -410,6 +439,7 @@ async def cbProxy(callback: CallbackQuery, state: FSMContext) -> None:
         await callback.message.edit_text(
             buildConfirmText(data),
             reply_markup=confirmKeyboard(),
+            parse_mode=PM
         )
         await callback.answer()
 
@@ -417,7 +447,11 @@ async def cbProxy(callback: CallbackQuery, state: FSMContext) -> None:
 @router.callback_query(F.data == "confirm:cancel", StateFilter(TestWizard.confirm))
 async def cbCancel(callback: CallbackQuery, state: FSMContext) -> None:
     await state.clear()
-    await callback.message.edit_text("Test cancelled.", reply_markup=mainMenuKeyboard())
+    await callback.message.edit_text(
+        i("Test cancelled."),
+        reply_markup=mainMenuKeyboard(),
+        parse_mode=PM
+    )
     await callback.answer()
 
 
@@ -432,49 +466,39 @@ async def cbConfirmStart(callback: CallbackQuery, state: FSMContext) -> None:
     if not allowed:
         await state.clear()
         await callback.message.edit_text(
-            f"Daily limit reached. {testsToday}/{dailyLimit} tests used today.\n\n"
-            "Your limit resets at midnight IST.",
+            f"{b('Daily limit reached')}\n\n{c(f'{testsToday}/{dailyLimit}')} tests used today.\n{i('Resets at midnight IST.')}",
             reply_markup=mainMenuKeyboard(),
+            parse_mode=PM
         )
         await callback.answer()
         return
 
-    data = await state.get_data()
+    data           = await state.get_data()
     await state.set_state(TestWizard.running)
-
-    phone = data["phone"]
-    duration = data["duration"]
-    workers = data["workers"]
-    useProxy = data.get("useProxy", False)
+    phone          = data["phone"]
+    duration       = data["duration"]
+    workers        = data["workers"]
+    useProxy       = data.get("useProxy", False)
     workingProxies = data.get("workingProxies", [])
 
     db.incrementTestCount(userId)
-    recordId = db.startTestRecord(userId, phone, duration, workers)
+    recordId               = db.startTestRecord(userId, phone, duration, workers)
     activeRecordIds[userId] = recordId
 
     runner = TesterRunner(
-        phone=phone,
-        duration=duration,
-        workers=workers,
-        useProxy=useProxy,
-        proxyList=workingProxies,
+        phone=phone, duration=duration, workers=workers,
+        useProxy=useProxy, proxyList=workingProxies,
     )
     activeRunners[userId] = runner
-    summaryShown[userId] = False
+    summaryShown[userId]  = False
 
-    _, testsNow, dailyLimitNow = db.canRunTest(userId)
-    usageNote = f"Tests today : {testsNow}/{dailyLimitNow}"
-
+    _, testsNow, limitNow = db.canRunTest(userId)
     dashMsg = await callback.message.edit_text(
-        "Running Test\n\n"
-        f"Target    : {phone}\n"
-        f"Duration  : {formatDuration(duration)}\n"
-        f"{usageNote}\n\n"
-        "Initializing...",
+        f"{b('Test Running')}  {c(phone)}\n\n{i('Initializing...')}\n\n{c(f'Tests today: {testsNow}/{limitNow}')}",
         reply_markup=runningKeyboard(),
+        parse_mode=PM
     )
     await callback.answer()
-
     await runner.start()
 
     task = asyncio.create_task(
@@ -503,7 +527,6 @@ async def cbStopTest(callback: CallbackQuery, state: FSMContext) -> None:
             pass
 
     await runner.stop()
-
     snap = runner.stats.snapshot()
     _saveHistory(userId, snap)
 
@@ -514,9 +537,9 @@ async def cbStopTest(callback: CallbackQuery, state: FSMContext) -> None:
 
     summary = buildSummaryText(snap, runner.phone)
     try:
-        await callback.message.edit_text(summary, reply_markup=finishedKeyboard())
+        await callback.message.edit_text(summary, reply_markup=finishedKeyboard(), parse_mode=PM)
     except Exception:
-        await callback.message.answer(summary, reply_markup=finishedKeyboard())
+        await callback.message.answer(summary, reply_markup=finishedKeyboard(), parse_mode=PM)
 
 
 @router.callback_query(F.data == "test:refresh")
@@ -526,10 +549,32 @@ async def cbRefresh(callback: CallbackQuery) -> None:
     if not runner:
         await callback.answer("No active test.", show_alert=True)
         return
-    snap = runner.stats.snapshot()
+    snap    = runner.stats.snapshot()
     newText = buildDashboardText(snap, runner.phone, runner.duration)
     try:
-        await callback.message.edit_text(newText, reply_markup=runningKeyboard())
+        await callback.message.edit_text(newText, reply_markup=runningKeyboard(), parse_mode=PM)
     except Exception:
         pass
     await callback.answer("Refreshed.")
+
+
+# ---------------------------------------------------------------------------
+# Back keyboards for custom input steps
+# ---------------------------------------------------------------------------
+
+from aiogram.types import InlineKeyboardMarkup
+from aiogram.utils.keyboard import InlineKeyboardBuilder
+
+
+def backToDurationKeyboard() -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.button(text="Back", callback_data="nav:duration")
+    builder.adjust(1)
+    return builder.as_markup()
+
+
+def backToWorkersKeyboard() -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.button(text="Back", callback_data="nav:workers")
+    builder.adjust(1)
+    return builder.as_markup()

@@ -78,6 +78,11 @@ class Database:
                 reason      TEXT NOT NULL DEFAULT '',
                 addedAt     REAL NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS skippedApis (
+                name        TEXT PRIMARY KEY,
+                addedAt     REAL NOT NULL
+            );
         """)
         self._conn.commit()
 
@@ -305,6 +310,29 @@ class Database:
             "SELECT * FROM blacklistedPhones ORDER BY addedAt DESC"
         ).fetchall()
         return [dict(r) for r in rows]
+
+    # ------------------------------------------------------------------
+    # Skipped APIs
+    # ------------------------------------------------------------------
+
+    def skipApi(self, name: str) -> None:
+        self._conn.execute(
+            "INSERT OR REPLACE INTO skippedApis (name, addedAt) VALUES (?,?)",
+            (name, time.time())
+        )
+        self._conn.commit()
+
+    def unskipApi(self, name: str) -> None:
+        self._conn.execute("DELETE FROM skippedApis WHERE name=?", (name,))
+        self._conn.commit()
+
+    def getSkippedApiNames(self) -> set:
+        rows = self._conn.execute("SELECT name FROM skippedApis").fetchall()
+        return {r["name"] for r in rows}
+
+    def isApiSkipped(self, name: str) -> bool:
+        row = self._conn.execute("SELECT name FROM skippedApis WHERE name=?", (name,)).fetchone()
+        return row is not None
 
     def close(self) -> None:
         self._conn.close()
