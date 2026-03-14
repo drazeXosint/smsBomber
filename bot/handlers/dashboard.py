@@ -3,19 +3,15 @@ from __future__ import annotations
 from aiogram import Router, F
 from aiogram.types import CallbackQuery
 
-from bot.keyboards.menus import (
-    configKeyboard,
-    configWorkersKeyboard,
-    backToMainKeyboard,
-    mainMenuKeyboard,
-)
+from bot.keyboards.menus import configKeyboard, configWorkersKeyboard, backToMainKeyboard
 from bot.config import DEFAULT_WORKERS
+from bot.utils import PM, b, i, c
 
 router = Router()
 
 cfg = {
     "defaultWorkers": DEFAULT_WORKERS,
-    "proxyEnabled": False,
+    "proxyEnabled":   False,
 }
 
 
@@ -29,14 +25,18 @@ async def cbConfig(callback: CallbackQuery) -> None:
 
 
 async def showConfig(callback: CallbackQuery) -> None:
-    text = (
-        "Configuration\n\n"
-        f"Default workers  : {cfg['defaultWorkers']}\n"
-        f"Proxy by default : {'Enabled' if cfg['proxyEnabled'] else 'Disabled'}"
+    proxy = "Enabled" if cfg["proxyEnabled"] else "Disabled"
+    text  = (
+        f"{b('Settings')}\n\n"
+        f"Default workers   {c(str(cfg['defaultWorkers']))}\n"
+        f"Proxy by default  {c(proxy)}"
     )
-    keyboard = configKeyboard(cfg["defaultWorkers"], cfg["proxyEnabled"])
     try:
-        await callback.message.edit_text(text, reply_markup=keyboard)
+        await callback.message.edit_text(
+            text,
+            reply_markup=configKeyboard(cfg["defaultWorkers"], cfg["proxyEnabled"]),
+            parse_mode=PM
+        )
     except Exception:
         pass
     await callback.answer()
@@ -45,8 +45,9 @@ async def showConfig(callback: CallbackQuery) -> None:
 @router.callback_query(F.data == "cfg:workers")
 async def cbCfgWorkers(callback: CallbackQuery) -> None:
     await callback.message.edit_text(
-        "Default Workers\n\nSelect the default number of sender workers.",
+        f"{b('Default Workers')}\n\nSelect the default number of concurrent workers.",
         reply_markup=configWorkersKeyboard(),
+        parse_mode=PM
     )
     await callback.answer()
 
