@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from typing import List, Dict, Any, Tuple, Optional
 
-from apis import API_CONFIGS as _BASE_CONFIGS # type: ignore
+from apis import API_CONFIGS as _BASE_CONFIGS
 from bot.services.database import db
 
 
@@ -15,14 +15,51 @@ class ApiManager:
     """
 
     def getMergedConfigs(self) -> List[Dict[str, Any]]:
-        configs = list(_BASE_CONFIGS)
-        for row in db.getAllCustomApis():
+        """
+        Returns merged API list. Custom APIs added via bot override base APIs
+        with the same name. Purely custom APIs are appended at the end.
+        """
+        customApis = db.getAllCustomApis()
+
+        # Build lookup by name (lowercased) and url for override detection
+        customByName: Dict[str, Dict] = {}
+        customByUrl:  Dict[str, Dict] = {}
+        for row in customApis:
             try:
                 cfg = json.loads(row["configJson"])
-                configs.append(cfg)
+                customByName[cfg.get("name", "").lower()] = cfg
+                customByUrl[cfg.get("url", "")]           = cfg
             except Exception:
                 pass
-        return configs
+
+        result    = []
+        seenNames = set()
+
+        # Go through base configs — replace with custom version if override exists
+        for base in _BASE_CONFIGS:
+            key = base["name"].lower()
+            override = customByName.get(key) or customByUrl.get(base["url"])
+            if override:
+                result.append(override)
+                seenNames.add(override.get("name", "").lower())
+            else:
+                result.append(base)
+                seenNames.add(key)
+
+        # Add purely custom APIs (not overrides of base)
+        for row in customApis:
+            try:
+                cfg = json.loads(row["configJson"])
+                if cfg.get("name", "").lower() not in seenNames:
+                    result.append(cfg)
+            except Exception:
+                pass
+
+        # Filter out skipped APIs
+        skipped = db.getSkippedApiNames()
+        result  = [cfg for cfg in result if cfg.get("name", "") not in skipped]
+
+        return result
 
     def validateApiJson(self, raw: str) -> Tuple[bool, Optional[Dict], str]:
         raw = raw.strip()

@@ -7,7 +7,8 @@ BOT_TOKEN: str = os.getenv("BOT_TOKEN", "")
 if not BOT_TOKEN:
     raise RuntimeError("BOT_TOKEN is not set. Add it to your .env file.")
 
-# Project root — always the folder containing this file's parent (bot/)
+# Absolute path to project root — derived from this file's location (bot/config.py → parent = bot/ → parent = root)
+# This is ALWAYS correct regardless of where Python is run from
 _ROOT: str = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 # Your Telegram user ID - only this ID can use /admin
@@ -22,11 +23,11 @@ DEFAULT_DAILY_LIMIT: int = 10
 # Dashboard update interval in seconds
 DASHBOARD_UPDATE_INTERVAL: float = 2.0
 
-# Proxy file path — absolute, always in project root
+# Proxy file — absolute path, always in project root
 PROXY_FILE: str = os.path.join(_ROOT, "proxies.txt")
 
-# SQLite database file path — absolute, always in project root
-# This ensures the DB is NEVER lost on restart regardless of working directory
+# Database file — absolute path, always in project root
+# NEVER use a relative path — it changes depending on where Python is launched from
 DB_FILE: str = os.path.join(_ROOT, "bot_data.db")
 
 # Default workers shown in wizard

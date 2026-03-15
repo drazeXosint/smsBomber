@@ -79,15 +79,20 @@ def randomPhone() -> str:
 def getMergedTagged() -> List[dict]:
     from apis import API_CONFIGS as BASE
     customApis = db.getAllCustomApis()
-    dbByUrl: dict = {}
+
+    # Build two lookup dicts — match by name first, then url as fallback
+    dbByName: dict = {}
+    dbByUrl:  dict = {}
     for row in customApis:
         cfg = json.loads(row["configJson"])
-        dbByUrl[cfg.get("url", "")] = row
+        dbByName[cfg.get("name", "").lower()] = row
+        dbByUrl[cfg.get("url", "")]           = row
 
     result    = []
     seenDbIds = set()
     for base in BASE:
-        row = dbByUrl.get(base["url"])
+        # Try name match first (survives URL edits in apis.py), then URL
+        row = dbByName.get(base["name"].lower()) or dbByUrl.get(base["url"])
         if row:
             cfg = json.loads(row["configJson"])
             cfg["_dbId"]       = row["id"]

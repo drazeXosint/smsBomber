@@ -457,7 +457,7 @@ class TesterRunner:
 
                 api = await self._apiQueue.next()
                 if api is None:
-                    await asyncio.sleep(1.0)
+                    await asyncio.sleep(1.0)  
                     continue
 
                 task = asyncio.create_task(
