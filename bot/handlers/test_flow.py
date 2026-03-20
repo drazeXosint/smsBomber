@@ -113,12 +113,13 @@ def buildDashboardText(snap: dict, phone: str, duration: int) -> str:
             rl_count += 1
         elif s.get("status") == "dead":
             dead_count += 1
-        elif s.get("requests", 0) > 0:
+        if s.get("requests", 0) > 0:
             conf = s.get("confirmed", 0)
             req  = s["requests"]
             ms   = s["avgMs"]
+            status_tag = " [RL]" if s.get("status") == "ratelimited" else (" [D]" if s.get("status") == "dead" else "")
             lines.append(
-                f"<code>{hEsc(name[:16]):<16}</code>  "
+                f"<code>{hEsc(name[:14]):<14}</code>{status_tag}  "
                 f"{c(str(conf))} otp  {req}req  {ms}ms"
             )
 

