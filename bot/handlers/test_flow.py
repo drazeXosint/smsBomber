@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from typing import Dict, Optional
 
 from aiogram import Router, F
@@ -16,19 +17,21 @@ from bot.keyboards.menus import (
 )
 from bot.services.tester_runner import TesterRunner, validateProxies
 from bot.services.proxy_manager import proxyManager
-from bot.services.database import db
+from bot.services.database import db, IST
 from bot.config import DASHBOARD_UPDATE_INTERVAL, ADMIN_ID, PROTECTED_NUMBER
 from bot.utils import PM, b, i, c, hEsc
 
 import random
+from datetime import datetime
 
 router = Router()
 
-activeRunners:   Dict[int, TesterRunner] = {}
-dashboardTasks:  Dict[int, asyncio.Task] = {}
-summaryShown:    Dict[int, bool]         = {}
-activeRecordIds: Dict[int, int]          = {}
-_lastConfig:     Dict[int, dict]         = {}
+# Use plain dict to avoid type annotation issues
+activeRunners:   dict = {}
+dashboardTasks:  dict = {}
+summaryShown:    dict = {}
+activeRecordIds: dict = {}
+_lastConfig:     dict = {}
 
 PROTECTED_RESPONSES = [
     "Poda kunne onn!!!",
@@ -40,9 +43,9 @@ PROTECTED_RESPONSES = [
 
 class TestWizard(StatesGroup):
     phone          = State()
-    duration       = State()   # Step 1
+    duration       = State()
     durationCustom = State()
-    workers        = State()   # Step 2
+    workers        = State()
     workersCustom  = State()
     proxy          = State()
     proxyChecking  = State()
@@ -203,11 +206,23 @@ async def dashboardLoop(runner, message, phone, duration, userId, state):
         summaryShown[userId] = True
         snap = runner.stats.snapshot()
         _saveHistory(userId, snap)
-        _lastConfig[userId] = {"phone": runner.phone, "duration": runner.duration, "workers": runner.workers}
+        _lastConfig[userId] = {
+            "phone":    runner.phone,
+            "duration": runner.duration,
+            "workers":  runner.workers,
+        }
         try:
-            await message.edit_text(buildSummaryText(snap, phone), reply_markup=finishedKeyboard(), parse_mode=PM)
+            await message.edit_text(
+                buildSummaryText(snap, phone),
+                reply_markup=finishedKeyboard(),
+                parse_mode=PM
+            )
         except Exception:
-            await message.answer(buildSummaryText(snap, phone), reply_markup=finishedKeyboard(), parse_mode=PM)
+            await message.answer(
+                buildSummaryText(snap, phone),
+                reply_markup=finishedKeyboard(),
+                parse_mode=PM
+            )
 
     activeRunners.pop(userId, None)
     dashboardTasks.pop(userId, None)
@@ -220,13 +235,35 @@ def _saveHistory(userId, snap):
     recordId = activeRecordIds.get(userId)
     if recordId:
         try:
+            apiSnapshot = json.dumps({
+                name: {
+                    "confirmed": s.get("confirmed", 0),
+                    "requests":  s.get("requests", 0),
+                    "responses": s.get("responses", 0),
+                    "errors":    s.get("errors", 0),
+                }
+                for name, s in snap.get("perApi", {}).items()
+                if s.get("requests", 0) > 0
+            })
+            totalReqs = snap.get("totalReqs", snap.get("total", 0))
+            otpHits   = snap.get("confirmed", snap.get("otpSent", 0))
             db.finishTestRecord(
                 recordId=recordId,
-                totalReqs=snap.get("totalReqs", snap.get("total", 0)),
-                otpHits=snap.get("confirmed", snap.get("otpSent", 0)),
+                totalReqs=totalReqs,
+                otpHits=otpHits,
                 errors=snap["errors"],
                 rps=snap["rps"],
+                apiSnapshot=apiSnapshot,
             )
+            db.updateUserStats(userId, totalReqs, otpHits)
+            for name, s in snap.get("perApi", {}).items():
+                if s.get("requests", 0) > 0:
+                    db.recordApiUsage(
+                        name=name,
+                        reqs=s.get("requests", 0),
+                        otps=s.get("confirmed", 0),
+                        errors=s.get("errors", 0),
+                    )
         except Exception:
             pass
 
@@ -248,6 +285,7 @@ async def cbStartTest(callback: CallbackQuery, state: FSMContext) -> None:
             await callback.answer("Your account has been restricted.", show_alert=True)
             return
         await callback.answer(f"Daily limit reached. {testsToday}/{dailyLimit} used.", show_alert=True)
+        db.recordLimitHit(userId)
         try:
             u        = db.getUser(userId)
             username = f"@{u['username']}" if u and u.get("username") else str(userId)
@@ -392,7 +430,6 @@ async def handleWorkersCustom(message: Message, state: FSMContext) -> None:
     except ValueError:
         await message.answer(f"Enter a number between {c('1')} and {c('64')}.", parse_mode=PM)
         return
-    data = await state.get_data()
     await state.update_data(workers=workers)
     await state.set_state(TestWizard.proxy)
     hasProxies = proxyManager.hasProxies()
@@ -516,6 +553,7 @@ async def cbConfirmStart(callback: CallbackQuery, state: FSMContext) -> None:
     runner = TesterRunner(
         phone=phone, duration=duration, workers=workers,
         useProxy=useProxy, proxyList=workingProxies,
+        userId=userId, bot=callback.bot,
     )
     activeRunners[userId] = runner
     summaryShown[userId]  = False
@@ -604,7 +642,10 @@ async def cbRepeatTest(callback: CallbackQuery, state: FSMContext) -> None:
     recordId = db.startTestRecord(userId, phone, duration, workers)
     activeRecordIds[userId] = recordId
 
-    runner = TesterRunner(phone=phone, duration=duration, workers=workers, useProxy=False)
+    runner = TesterRunner(
+        phone=phone, duration=duration, workers=workers,
+        useProxy=False, userId=userId, bot=callback.bot,
+    )
     activeRunners[userId] = runner
     summaryShown[userId]  = False
 
@@ -639,16 +680,66 @@ async def cbUserHistory(callback: CallbackQuery) -> None:
         await callback.answer()
         return
 
-    lines = [f"{b('My History')}  {c(f'last {len(history)}')}\n"]
+    builder = InlineKeyboardBuilder()
+    lines   = [f"{b('My History')}  {c(f'last {len(history)}')}\n"]
     for h in history:
-        from datetime import datetime
-        dt = datetime.fromtimestamp(h["startedAt"]).strftime("%d %b %H:%M")
+        dt = datetime.fromtimestamp(h["startedAt"], tz=IST).strftime("%d %b %H:%M")
         lines.append(
             f"{c(dt)}  {h['phone']}  {h['duration']}s  "
             f"OTP {h['otpHits']}  REQ {h['totalReqs']}"
         )
-    builder = InlineKeyboardBuilder()
+        builder.button(
+            text=f"{h['phone']}  {h['duration']}s  OTP {h['otpHits']}",
+            callback_data=f"hist:detail:{h['id']}"
+        )
     builder.button(text="Main Menu", callback_data="nav:main_menu")
+    builder.adjust(1)
+    await callback.message.edit_text(
+        "\n".join(lines), reply_markup=builder.as_markup(), parse_mode=PM
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("hist:detail:"))
+async def cbHistDetail(callback: CallbackQuery) -> None:
+    recordId = int(callback.data.split(":")[2])
+    h = db.getTestRecord(recordId)
+    if not h or h["userId"] != callback.from_user.id:
+        await callback.answer("Not found.", show_alert=True)
+        return
+
+    dt    = datetime.fromtimestamp(h["startedAt"], tz=IST).strftime("%d %b %Y %H:%M")
+    lines = [
+        f"{b('Test Detail')}\n",
+        f"Phone      {c(h['phone'])}",
+        f"Date       {c(dt)}",
+        f"Duration   {c(str(h['duration']) + 's')}",
+        f"Workers    {c(str(h['workers']))}",
+        f"Requests   {c(str(h['totalReqs']))}",
+        f"OTPs       {c(str(h['otpHits']))}",
+        f"Errors     {c(str(h['errors']))}",
+        f"Req/sec    {c(str(h['rps']))}",
+    ]
+
+    snap = h.get("apiSnapshot")
+    if snap:
+        try:
+            data    = json.loads(snap)
+            sorted_ = sorted(data.items(), key=lambda x: x[1].get("confirmed", 0), reverse=True)
+            top     = [(n, s) for n, s in sorted_ if s.get("requests", 0) > 0][:6]
+            if top:
+                lines.append(f"\n{b('API Breakdown')}")
+                for name, s in top:
+                    lines.append(
+                        f"<code>{hEsc(name[:16]):<16}</code>  "
+                        f"{c(str(s.get('confirmed', 0)))} otp  "
+                        f"{s.get('requests', 0)} req"
+                    )
+        except Exception:
+            pass
+
+    builder = InlineKeyboardBuilder()
+    builder.button(text="Back", callback_data="menu:history")
     await callback.message.edit_text(
         "\n".join(lines), reply_markup=builder.as_markup(), parse_mode=PM
     )

@@ -21,8 +21,10 @@ TURSO_TOKEN = os.getenv("TURSO_TOKEN", "")
 if not TURSO_URL or not TURSO_TOKEN:
     raise RuntimeError("TURSO_URL and TURSO_TOKEN must be set in your .env file.")
 
-# Local replica path — keeps a local copy for fast reads, syncs to Turso
 LOCAL_DB_PATH = "/app/local_replica.db"
+
+# Sync to Turso every N writes — reduces network calls massively
+SYNC_EVERY_N_WRITES = 10
 
 
 def getIstToday() -> str:
@@ -37,8 +39,8 @@ def getSecondsUntilMidnightIst() -> float:
 
 class Database:
     def __init__(self) -> None:
-        self._lock = threading.Lock()
-        # Embedded replica: reads from local file, writes sync to Turso
+        self._lock       = threading.Lock()
+        self._writeCount = 0
         self._conn = libsql.connect(
             database=LOCAL_DB_PATH,
             sync_url=TURSO_URL,
@@ -67,7 +69,6 @@ class Database:
                 totalOtpHits    INTEGER NOT NULL DEFAULT 0,
                 totalReqs       INTEGER NOT NULL DEFAULT 0
             );
-
             CREATE TABLE IF NOT EXISTS testHistory (
                 id          INTEGER PRIMARY KEY AUTOINCREMENT,
                 userId      INTEGER NOT NULL,
@@ -82,7 +83,6 @@ class Database:
                 finishedAt  REAL,
                 apiSnapshot TEXT
             );
-
             CREATE TABLE IF NOT EXISTS customApis (
                 id          INTEGER PRIMARY KEY AUTOINCREMENT,
                 name        TEXT NOT NULL,
@@ -91,7 +91,6 @@ class Database:
                 configJson  TEXT NOT NULL,
                 addedAt     REAL NOT NULL
             );
-
             CREATE TABLE IF NOT EXISTS proxyFiles (
                 id          INTEGER PRIMARY KEY AUTOINCREMENT,
                 label       TEXT NOT NULL,
@@ -99,23 +98,19 @@ class Database:
                 proxyCount  INTEGER NOT NULL DEFAULT 0,
                 uploadedAt  REAL NOT NULL
             );
-
             CREATE TABLE IF NOT EXISTS blacklistedPhones (
                 phone       TEXT PRIMARY KEY,
                 reason      TEXT NOT NULL DEFAULT '',
                 addedAt     REAL NOT NULL
             );
-
             CREATE TABLE IF NOT EXISTS skippedApis (
                 name        TEXT PRIMARY KEY,
                 addedAt     REAL NOT NULL
             );
-
             CREATE TABLE IF NOT EXISTS botSettings (
                 key         TEXT PRIMARY KEY,
                 value       TEXT NOT NULL
             );
-
             CREATE TABLE IF NOT EXISTS favoriteNumbers (
                 id          INTEGER PRIMARY KEY AUTOINCREMENT,
                 userId      INTEGER NOT NULL,
@@ -124,7 +119,6 @@ class Database:
                 addedAt     REAL NOT NULL,
                 UNIQUE(userId, phone)
             );
-
             CREATE TABLE IF NOT EXISTS testPresets (
                 id          INTEGER PRIMARY KEY AUTOINCREMENT,
                 userId      INTEGER NOT NULL,
@@ -135,14 +129,12 @@ class Database:
                 createdAt   REAL NOT NULL,
                 UNIQUE(userId, name)
             );
-
             CREATE TABLE IF NOT EXISTS referrals (
                 id          INTEGER PRIMARY KEY AUTOINCREMENT,
                 referrerId  INTEGER NOT NULL,
                 referreeId  INTEGER NOT NULL UNIQUE,
                 createdAt   REAL NOT NULL
             );
-
             CREATE TABLE IF NOT EXISTS apiUsageStats (
                 name        TEXT PRIMARY KEY,
                 totalReqs   INTEGER NOT NULL DEFAULT 0,
@@ -150,7 +142,6 @@ class Database:
                 totalErrors INTEGER NOT NULL DEFAULT 0,
                 lastUsedAt  REAL NOT NULL DEFAULT 0
             );
-
             CREATE TABLE IF NOT EXISTS scheduledTests (
                 id          INTEGER PRIMARY KEY AUTOINCREMENT,
                 userId      INTEGER NOT NULL,
@@ -161,14 +152,12 @@ class Database:
                 triggered   INTEGER NOT NULL DEFAULT 0,
                 createdAt   REAL NOT NULL
             );
-
             CREATE TABLE IF NOT EXISTS abuseLog (
                 userId          INTEGER PRIMARY KEY,
                 limitHitStreak  INTEGER NOT NULL DEFAULT 0,
                 lastHitDate     TEXT NOT NULL DEFAULT ''
             );
         """)
-
         migrations = [
             "ALTER TABLE users ADD COLUMN testsTotal INTEGER NOT NULL DEFAULT 0",
             "ALTER TABLE users ADD COLUMN streakDays INTEGER NOT NULL DEFAULT 0",
@@ -188,14 +177,20 @@ class Database:
         self._conn.sync()
 
     # ------------------------------------------------------------------
-    # Internal helpers
+    # Internal helpers — batched sync for speed
     # ------------------------------------------------------------------
 
     def _execute(self, sql: str, params: tuple = ()) -> Any:
         with self._lock:
             cur = self._conn.execute(sql, params)
             self._conn.commit()
-            self._conn.sync()
+            self._writeCount += 1
+            if self._writeCount >= SYNC_EVERY_N_WRITES:
+                try:
+                    self._conn.sync()
+                except Exception:
+                    pass
+                self._writeCount = 0
             return cur
 
     def _fetchone(self, sql: str, params: tuple = ()) -> Optional[Dict]:
@@ -216,6 +211,15 @@ class Database:
             cols = [d[0] for d in cur.description]
             return [dict(zip(cols, r)) for r in rows]
 
+    def _forceSync(self) -> None:
+        """Force immediate sync to Turso — call for critical writes."""
+        with self._lock:
+            try:
+                self._conn.sync()
+                self._writeCount = 0
+            except Exception:
+                pass
+
     # ------------------------------------------------------------------
     # Bot settings
     # ------------------------------------------------------------------
@@ -225,10 +229,8 @@ class Database:
         return row["value"] if row else default
 
     def setSetting(self, key: str, value: str) -> None:
-        self._execute(
-            "INSERT OR REPLACE INTO botSettings (key, value) VALUES (?, ?)",
-            (key, value)
-        )
+        self._execute("INSERT OR REPLACE INTO botSettings (key, value) VALUES (?, ?)", (key, value))
+        self._forceSync()
 
     def isMaintenanceMode(self) -> bool:
         return self.getSetting("maintenanceMode", "0") == "1"
@@ -259,6 +261,7 @@ class Database:
             "VALUES (?, ?, ?, ?, ?, ?, ?, 0, 0)",
             (userId, username, firstName, lastName or "", time.time(), DEFAULT_DAILY_LIMIT, getIstToday())
         )
+        self._forceSync()
         return True
 
     def getUser(self, userId: int) -> Optional[Dict[str, Any]]:
@@ -282,20 +285,22 @@ class Database:
 
     def banUser(self, userId: int) -> None:
         self._execute("UPDATE users SET isBanned=1 WHERE userId=?", (userId,))
+        self._forceSync()
 
     def unbanUser(self, userId: int) -> None:
         self._execute("UPDATE users SET isBanned=0 WHERE userId=?", (userId,))
+        self._forceSync()
 
     def setDailyLimit(self, userId: int, limit: int) -> None:
         self._execute("UPDATE users SET dailyLimit=? WHERE userId=?", (limit, userId))
+        self._forceSync()
 
     def setGlobalDailyLimit(self, limit: int) -> None:
         self._execute("UPDATE users SET dailyLimit=?", (limit,))
+        self._forceSync()
 
     def getTopUsers(self, limit: int = 10) -> List[Dict[str, Any]]:
-        return self._fetchall(
-            "SELECT * FROM users ORDER BY testsTotal DESC LIMIT ?", (limit,)
-        )
+        return self._fetchall("SELECT * FROM users ORDER BY testsTotal DESC LIMIT ?", (limit,))
 
     # ------------------------------------------------------------------
     # Daily limit + streak
@@ -340,8 +345,7 @@ class Database:
         if row["isBanned"]:
             return False, row["testsToday"], row["dailyLimit"]
         effectiveLimit = row["dailyLimit"] + row["bonusTests"]
-        allowed = row["testsToday"] < effectiveLimit
-        return allowed, row["testsToday"], effectiveLimit
+        return row["testsToday"] < effectiveLimit, row["testsToday"], effectiveLimit
 
     def incrementTestCount(self, userId: int) -> None:
         self._ensureResetForUser(userId)
@@ -362,9 +366,11 @@ class Database:
             "UPDATE users SET testsToday=0, lastResetDate=? WHERE userId=?",
             (getIstToday(), userId)
         )
+        self._forceSync()
 
     def resetAllTests(self) -> None:
         self._execute("UPDATE users SET testsToday=0, lastResetDate=?", (getIstToday(),))
+        self._forceSync()
 
     # ------------------------------------------------------------------
     # Test history
@@ -377,7 +383,7 @@ class Database:
                 (userId, phone, duration, workers, time.time())
             )
             self._conn.commit()
-            self._conn.sync()
+            self._writeCount += 1
             return cur.lastrowid
 
     def finishTestRecord(self, recordId: int, totalReqs: int, otpHits: int, errors: int, rps: float, apiSnapshot: str = "") -> None:
@@ -385,6 +391,7 @@ class Database:
             "UPDATE testHistory SET totalReqs=?, otpHits=?, errors=?, rps=?, finishedAt=?, apiSnapshot=? WHERE id=?",
             (totalReqs, otpHits, errors, rps, time.time(), apiSnapshot, recordId)
         )
+        self._forceSync()
 
     def getUserHistory(self, userId: int, limit: int = 10) -> List[Dict[str, Any]]:
         return self._fetchall(
@@ -435,9 +442,11 @@ class Database:
             "UPDATE customApis SET name=?, method=?, url=?, configJson=? WHERE id=?",
             (name, method, url, configJson, apiId)
         )
+        self._forceSync()
 
     def deleteCustomApi(self, apiId: int) -> None:
         self._execute("DELETE FROM customApis WHERE id=?", (apiId,))
+        self._forceSync()
 
     # ------------------------------------------------------------------
     # API usage stats
@@ -456,9 +465,7 @@ class Database:
         )
 
     def getTopApis(self, limit: int = 10) -> List[Dict[str, Any]]:
-        return self._fetchall(
-            "SELECT * FROM apiUsageStats ORDER BY totalOtps DESC LIMIT ?", (limit,)
-        )
+        return self._fetchall("SELECT * FROM apiUsageStats ORDER BY totalOtps DESC LIMIT ?", (limit,))
 
     def getAllApiStats(self) -> List[Dict[str, Any]]:
         return self._fetchall("SELECT * FROM apiUsageStats ORDER BY totalReqs DESC")
@@ -485,6 +492,7 @@ class Database:
 
     def deleteProxyFile(self, fileId: int) -> None:
         self._execute("DELETE FROM proxyFiles WHERE id=?", (fileId,))
+        self._forceSync()
 
     def getAllProxies(self) -> List[str]:
         rows = self._fetchall("SELECT content FROM proxyFiles")
@@ -505,13 +513,14 @@ class Database:
             "INSERT OR REPLACE INTO blacklistedPhones (phone, reason, addedAt) VALUES (?,?,?)",
             (phone, reason, time.time())
         )
+        self._forceSync()
 
     def unblacklistPhone(self, phone: str) -> None:
         self._execute("DELETE FROM blacklistedPhones WHERE phone=?", (phone,))
+        self._forceSync()
 
     def isPhoneBlacklisted(self, phone: str) -> bool:
-        row = self._fetchone("SELECT phone FROM blacklistedPhones WHERE phone=?", (phone,))
-        return row is not None
+        return self._fetchone("SELECT phone FROM blacklistedPhones WHERE phone=?", (phone,)) is not None
 
     def getAllBlacklisted(self) -> List[Dict[str, Any]]:
         return self._fetchall("SELECT * FROM blacklistedPhones ORDER BY addedAt DESC")
@@ -521,34 +530,29 @@ class Database:
     # ------------------------------------------------------------------
 
     def skipApi(self, name: str) -> None:
-        self._execute(
-            "INSERT OR REPLACE INTO skippedApis (name, addedAt) VALUES (?,?)",
-            (name, time.time())
-        )
+        self._execute("INSERT OR REPLACE INTO skippedApis (name, addedAt) VALUES (?,?)", (name, time.time()))
+        self._forceSync()
 
     def unskipApi(self, name: str) -> None:
         self._execute("DELETE FROM skippedApis WHERE name=?", (name,))
+        self._forceSync()
 
     def getSkippedApiNames(self) -> set:
         rows = self._fetchall("SELECT name FROM skippedApis")
         return {r["name"] for r in rows}
 
     def isApiSkipped(self, name: str) -> bool:
-        row = self._fetchone("SELECT name FROM skippedApis WHERE name=?", (name,))
-        return row is not None
+        return self._fetchone("SELECT name FROM skippedApis WHERE name=?", (name,)) is not None
 
     # ------------------------------------------------------------------
     # Favorite numbers
     # ------------------------------------------------------------------
 
     def getFavorites(self, userId: int) -> List[Dict[str, Any]]:
-        return self._fetchall(
-            "SELECT * FROM favoriteNumbers WHERE userId=? ORDER BY addedAt DESC", (userId,)
-        )
+        return self._fetchall("SELECT * FROM favoriteNumbers WHERE userId=? ORDER BY addedAt DESC", (userId,))
 
     def addFavorite(self, userId: int, phone: str, label: str = "") -> bool:
-        existing = self._fetchall("SELECT id FROM favoriteNumbers WHERE userId=?", (userId,))
-        if len(existing) >= 3:
+        if len(self._fetchall("SELECT id FROM favoriteNumbers WHERE userId=?", (userId,))) >= 3:
             return False
         try:
             self._execute(
@@ -560,28 +564,22 @@ class Database:
             return False
 
     def removeFavorite(self, userId: int, phone: str) -> None:
-        self._execute(
-            "DELETE FROM favoriteNumbers WHERE userId=? AND phone=?", (userId, phone)
-        )
+        self._execute("DELETE FROM favoriteNumbers WHERE userId=? AND phone=?", (userId, phone))
 
     def isFavorite(self, userId: int, phone: str) -> bool:
-        row = self._fetchone(
+        return self._fetchone(
             "SELECT id FROM favoriteNumbers WHERE userId=? AND phone=?", (userId, phone)
-        )
-        return row is not None
+        ) is not None
 
     # ------------------------------------------------------------------
     # Test presets
     # ------------------------------------------------------------------
 
     def getPresets(self, userId: int) -> List[Dict[str, Any]]:
-        return self._fetchall(
-            "SELECT * FROM testPresets WHERE userId=? ORDER BY createdAt DESC", (userId,)
-        )
+        return self._fetchall("SELECT * FROM testPresets WHERE userId=? ORDER BY createdAt DESC", (userId,))
 
     def addPreset(self, userId: int, name: str, phone: str, duration: int, workers: int) -> bool:
-        existing = self._fetchall("SELECT id FROM testPresets WHERE userId=?", (userId,))
-        if len(existing) >= 5:
+        if len(self._fetchall("SELECT id FROM testPresets WHERE userId=?", (userId,))) >= 5:
             return False
         try:
             self._execute(
@@ -593,9 +591,7 @@ class Database:
             return False
 
     def deletePreset(self, userId: int, presetId: int) -> None:
-        self._execute(
-            "DELETE FROM testPresets WHERE id=? AND userId=?", (presetId, userId)
-        )
+        self._execute("DELETE FROM testPresets WHERE id=? AND userId=?", (presetId, userId))
 
     def getPreset(self, presetId: int) -> Optional[Dict[str, Any]]:
         return self._fetchone("SELECT * FROM testPresets WHERE id=?", (presetId,))
@@ -610,8 +606,7 @@ class Database:
     def applyReferral(self, referrerId: int, referreeId: int) -> bool:
         if referrerId == referreeId:
             return False
-        existing = self._fetchone("SELECT id FROM referrals WHERE referreeId=?", (referreeId,))
-        if existing:
+        if self._fetchone("SELECT id FROM referrals WHERE referreeId=?", (referreeId,)):
             return False
         self._execute(
             "INSERT INTO referrals (referrerId, referreeId, createdAt) VALUES (?,?,?)",
@@ -619,6 +614,7 @@ class Database:
         )
         self._execute("UPDATE users SET bonusTests=bonusTests+3 WHERE userId=?", (referrerId,))
         self._execute("UPDATE users SET bonusTests=bonusTests+1 WHERE userId=?", (referreeId,))
+        self._forceSync()
         return True
 
     def getReferralCount(self, userId: int) -> int:
@@ -626,9 +622,7 @@ class Database:
         return row["cnt"] if row else 0
 
     def getReferrals(self, userId: int) -> List[Dict[str, Any]]:
-        return self._fetchall(
-            "SELECT * FROM referrals WHERE referrerId=? ORDER BY createdAt DESC", (userId,)
-        )
+        return self._fetchall("SELECT * FROM referrals WHERE referrerId=? ORDER BY createdAt DESC", (userId,))
 
     # ------------------------------------------------------------------
     # Scheduled tests
@@ -666,9 +660,7 @@ class Database:
         )
 
     def deleteAllScheduledTests(self, userId: int) -> None:
-        self._execute(
-            "DELETE FROM scheduledTests WHERE userId=? AND triggered=0", (userId,)
-        )
+        self._execute("DELETE FROM scheduledTests WHERE userId=? AND triggered=0", (userId,))
 
     # ------------------------------------------------------------------
     # Auto-ban / abuse tracking

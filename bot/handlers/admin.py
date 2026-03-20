@@ -1,8 +1,6 @@
 from __future__ import annotations
 
-import asyncio
-from datetime import datetime, timezone, timedelta
-from typing import Optional
+from datetime import datetime
 
 from aiogram import Router, F
 from aiogram.filters import Command
@@ -43,19 +41,20 @@ class AdminStates(StatesGroup):
 
 def adminMenuKeyboard() -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
-    builder.button(text="Users",         callback_data="adm:users:0")
-    builder.button(text="Search User",   callback_data="adm:search")
-    builder.button(text="Stats",         callback_data="adm:stats")
-    builder.button(text="Analytics",     callback_data="adm:analytics")
-    builder.button(text="API Manager",   callback_data="aapi:menu")
-    builder.button(text="Proxy Manager", callback_data="aprx:menu")
-    builder.button(text="Maintenance",   callback_data="adm:maintenance")
-    builder.button(text="DM User",       callback_data="adm:dmlist:0")
-    builder.button(text="Reset All",     callback_data="adm:reset_all")
-    builder.button(text="Global Limit",  callback_data="adm:global_limit")
-    builder.button(text="Broadcast",     callback_data="adm:broadcast")
-    builder.button(text="Blacklist",     callback_data="adm:blacklist:0")
-    builder.adjust(2, 2, 2, 2, 2, 2)
+    builder.button(text="Users",          callback_data="adm:users:0")
+    builder.button(text="Search User",    callback_data="adm:search")
+    builder.button(text="Stats",          callback_data="adm:stats")
+    builder.button(text="Analytics",      callback_data="adm:analytics")
+    builder.button(text="Live Dashboard", callback_data="adm:live")
+    builder.button(text="API Manager",    callback_data="aapi:menu")
+    builder.button(text="Proxy Manager",  callback_data="aprx:menu")
+    builder.button(text="Maintenance",    callback_data="adm:maintenance")
+    builder.button(text="DM User",        callback_data="adm:dmlist:0")
+    builder.button(text="Reset All",      callback_data="adm:reset_all")
+    builder.button(text="Global Limit",   callback_data="adm:global_limit")
+    builder.button(text="Broadcast",      callback_data="adm:broadcast")
+    builder.button(text="Blacklist",      callback_data="adm:blacklist:0")
+    builder.adjust(2, 2, 1, 2, 2, 2, 1)
     return builder.as_markup()
 
 
@@ -229,10 +228,10 @@ async def cbAnalytics(callback: CallbackQuery) -> None:
     if not isAdmin(callback.from_user.id):
         await callback.answer("Access denied.", show_alert=True)
         return
-    stats  = db.getAnalytics()
-    users  = db.getAllUsers(offset=0, limit=9999)
-    banned = sum(1 for u in users if u["isBanned"])
-    active = sum(1 for u in users if u["testsToday"] > 0)
+    stats   = db.getAnalytics()
+    users   = db.getAllUsers(offset=0, limit=9999)
+    banned  = sum(1 for u in users if u["isBanned"])
+    active  = sum(1 for u in users if u["testsToday"] > 0)
     topApis = db.getTopApis(limit=5)
     apiLines = []
     for a in topApis:
@@ -676,9 +675,7 @@ async def cbUserHistory(callback: CallbackQuery) -> None:
     builder = InlineKeyboardBuilder()
     builder.button(text="Back", callback_data=f"adm:user:{userId}")
     await callback.message.edit_text(
-        "\n".join(lines),
-        reply_markup=builder.as_markup(),
-        parse_mode=PM
+        "\n".join(lines), reply_markup=builder.as_markup(), parse_mode=PM
     )
     await callback.answer()
 
