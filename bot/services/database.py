@@ -21,6 +21,9 @@ TURSO_TOKEN = os.getenv("TURSO_TOKEN", "")
 if not TURSO_URL or not TURSO_TOKEN:
     raise RuntimeError("TURSO_URL and TURSO_TOKEN must be set in your .env file.")
 
+# Local replica path — keeps a local copy for fast reads, syncs to Turso
+LOCAL_DB_PATH = "/app/local_replica.db"
+
 
 def getIstToday() -> str:
     return datetime.now(IST).strftime("%Y-%m-%d")
@@ -34,21 +37,18 @@ def getSecondsUntilMidnightIst() -> float:
 
 class Database:
     def __init__(self) -> None:
-        self._local = threading.local()
-        self._lock  = threading.Lock()
-        conn = self._conn()
-        self._createTables(conn)
+        self._lock = threading.Lock()
+        # Embedded replica: reads from local file, writes sync to Turso
+        self._conn = libsql.connect(
+            database=LOCAL_DB_PATH,
+            sync_url=TURSO_URL,
+            auth_token=TURSO_TOKEN,
+        )
+        self._conn.sync()
+        self._createTables()
 
-    def _conn(self):
-        if not getattr(self._local, "conn", None):
-            self._local.conn = libsql.connect(
-                database=TURSO_URL,
-                auth_token=TURSO_TOKEN,
-            )
-        return self._local.conn
-
-    def _createTables(self, conn) -> None:
-        conn.executescript("""
+    def _createTables(self) -> None:
+        self._conn.executescript("""
             CREATE TABLE IF NOT EXISTS users (
                 userId          INTEGER PRIMARY KEY,
                 username        TEXT,
@@ -181,10 +181,11 @@ class Database:
         ]
         for sql in migrations:
             try:
-                conn.execute(sql)
-                conn.commit()
+                self._conn.execute(sql)
+                self._conn.commit()
             except Exception:
                 pass
+        self._conn.sync()
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -192,16 +193,15 @@ class Database:
 
     def _execute(self, sql: str, params: tuple = ()) -> Any:
         with self._lock:
-            conn = self._conn()
-            cur  = conn.execute(sql, params)
-            conn.commit()
+            cur = self._conn.execute(sql, params)
+            self._conn.commit()
+            self._conn.sync()
             return cur
 
     def _fetchone(self, sql: str, params: tuple = ()) -> Optional[Dict]:
         with self._lock:
-            conn = self._conn()
-            cur  = conn.execute(sql, params)
-            row  = cur.fetchone()
+            cur = self._conn.execute(sql, params)
+            row = cur.fetchone()
             if row is None:
                 return None
             cols = [d[0] for d in cur.description]
@@ -209,8 +209,7 @@ class Database:
 
     def _fetchall(self, sql: str, params: tuple = ()) -> List[Dict]:
         with self._lock:
-            conn = self._conn()
-            cur  = conn.execute(sql, params)
+            cur  = self._conn.execute(sql, params)
             rows = cur.fetchall()
             if not rows:
                 return []
@@ -373,12 +372,12 @@ class Database:
 
     def startTestRecord(self, userId: int, phone: str, duration: int, workers: int) -> int:
         with self._lock:
-            conn = self._conn()
-            cur  = conn.execute(
+            cur = self._conn.execute(
                 "INSERT INTO testHistory (userId, phone, duration, workers, startedAt) VALUES (?, ?, ?, ?, ?)",
                 (userId, phone, duration, workers, time.time())
             )
-            conn.commit()
+            self._conn.commit()
+            self._conn.sync()
             return cur.lastrowid
 
     def finishTestRecord(self, recordId: int, totalReqs: int, otpHits: int, errors: int, rps: float, apiSnapshot: str = "") -> None:
@@ -417,12 +416,12 @@ class Database:
 
     def addCustomApi(self, name: str, method: str, url: str, configJson: str) -> int:
         with self._lock:
-            conn = self._conn()
-            cur  = conn.execute(
+            cur = self._conn.execute(
                 "INSERT INTO customApis (name, method, url, configJson, addedAt) VALUES (?, ?, ?, ?, ?)",
                 (name, method, url, configJson, time.time())
             )
-            conn.commit()
+            self._conn.commit()
+            self._conn.sync()
             return cur.lastrowid
 
     def getAllCustomApis(self) -> List[Dict[str, Any]]:
@@ -470,12 +469,12 @@ class Database:
 
     def addProxyFile(self, label: str, content: str, proxyCount: int) -> int:
         with self._lock:
-            conn = self._conn()
-            cur  = conn.execute(
+            cur = self._conn.execute(
                 "INSERT INTO proxyFiles (label, content, proxyCount, uploadedAt) VALUES (?, ?, ?, ?)",
                 (label, content, proxyCount, time.time())
             )
-            conn.commit()
+            self._conn.commit()
+            self._conn.sync()
             return cur.lastrowid
 
     def getAllProxyFiles(self) -> List[Dict[str, Any]]:
@@ -618,12 +617,8 @@ class Database:
             "INSERT INTO referrals (referrerId, referreeId, createdAt) VALUES (?,?,?)",
             (referrerId, referreeId, time.time())
         )
-        self._execute(
-            "UPDATE users SET bonusTests=bonusTests+3 WHERE userId=?", (referrerId,)
-        )
-        self._execute(
-            "UPDATE users SET bonusTests=bonusTests+1 WHERE userId=?", (referreeId,)
-        )
+        self._execute("UPDATE users SET bonusTests=bonusTests+3 WHERE userId=?", (referrerId,))
+        self._execute("UPDATE users SET bonusTests=bonusTests+1 WHERE userId=?", (referreeId,))
         return True
 
     def getReferralCount(self, userId: int) -> int:
@@ -641,12 +636,12 @@ class Database:
 
     def addScheduledTest(self, userId: int, phone: str, duration: int, workers: int, runAt: float) -> int:
         with self._lock:
-            conn = self._conn()
-            cur  = conn.execute(
+            cur = self._conn.execute(
                 "INSERT INTO scheduledTests (userId, phone, duration, workers, runAt, createdAt) VALUES (?,?,?,?,?,?)",
                 (userId, phone, duration, workers, runAt, time.time())
             )
-            conn.commit()
+            self._conn.commit()
+            self._conn.sync()
             return cur.lastrowid
 
     def getDueScheduledTests(self) -> List[Dict[str, Any]]:
@@ -714,8 +709,11 @@ class Database:
         self._execute("DELETE FROM abuseLog WHERE userId=?", (userId,))
 
     def close(self) -> None:
-        if getattr(self._local, "conn", None):
-            self._local.conn.close()
+        try:
+            self._conn.sync()
+            self._conn.close()
+        except Exception:
+            pass
 
 
 db = Database()
