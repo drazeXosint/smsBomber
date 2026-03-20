@@ -300,8 +300,41 @@ async def cbStartTest(callback: CallbackQuery, state: FSMContext) -> None:
         return
     await state.clear()
     await state.set_state(TestWizard.phone)
+
+    # Build keyboard with favorites as quick-pick buttons
+    favs    = db.getFavorites(userId)
+    builder = InlineKeyboardBuilder()
+    if favs:
+        for f in favs:
+            label = f["label"] or f["phone"]
+            builder.button(text=label, callback_data=f"startfav:{f['phone']}")
+        builder.adjust(1)
+    builder.button(text="Back", callback_data="nav:main_menu")
+    builder.adjust(*([1] * len(favs)), 1)
+
+    text = f"{b('Start Test')}\n\nEnter the 10-digit target number.\n{i('Example: 9876543210')}"
+    if favs:
+        text += f"\n\n{i('Or pick a saved favorite below:')}"
+
+    await callback.message.edit_text(text, reply_markup=builder.as_markup(), parse_mode=PM)
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("startfav:"), StateFilter(TestWizard.phone))
+async def cbStartFromFavorite(callback: CallbackQuery, state: FSMContext) -> None:
+    phone  = callback.data.split(":", 1)[1]
+    userId = callback.from_user.id
+    if phone == PROTECTED_NUMBER and userId != ADMIN_ID:
+        await callback.answer(random.choice(PROTECTED_RESPONSES), show_alert=True)
+        return
+    if db.isPhoneBlacklisted(phone) and userId != ADMIN_ID:
+        await callback.answer("That number is not available for testing.", show_alert=True)
+        return
+    await state.update_data(phone=phone)
+    await state.set_state(TestWizard.duration)
     await callback.message.edit_text(
-        f"{b('Start Test')}\n\nEnter the 10-digit target number.\n{i('Example: 9876543210')}",
+        durationText(phone),
+        reply_markup=durationKeyboard(),
         parse_mode=PM
     )
     await callback.answer()

@@ -518,26 +518,7 @@ class TesterRunner:
         return self._running
 
     async def _otpNotify(self, apiName: str) -> None:
-        if not self._bot or not self._userId:
-            return
-        now = time.time()
-        if now - self._lastOtpNotifTime < 5.0:
-            return
-        self._lastOtpNotifTime = now
-        try:
-            total = self.stats.confirmed
-            calls = self.stats.calls
-            callStr = f"\nCalls     <code>{calls}</code>" if calls > 0 else ""
-            await self._bot.send_message(
-                self._userId,
-                f"<b>OTP Confirmed!</b>\n\n"
-                f"Phone     <code>{self.phone}</code>\n"
-                f"API       <code>{apiName}</code>\n"
-                f"Total     <code>{total}</code> confirmed{callStr}",
-                parse_mode="HTML"
-            )
-        except Exception:
-            pass
+        pass  # Notifications disabled
 
     async def start(self) -> None:
         self._running  = True
@@ -572,11 +553,11 @@ class TesterRunner:
         watchdog = asyncio.create_task(self._watchdog(), name="watchdog")
         self._tasks.extend([timer, watchdog])
 
-        # Fire external bomber alongside main test — silently skips if down
+        # Fire external bomber alongside main test — routes through proxies if direct fails
         try:
             from external_bomber import externalBomberLoop
             extTask = asyncio.create_task(
-                externalBomberLoop(self.phone, self._stopEvent),
+                externalBomberLoop(self.phone, self._stopEvent, proxyList),
                 name="external_bomber"
             )
             self._tasks.append(extTask)
