@@ -1,9 +1,36 @@
-# Add this function to bot/utils.py
-# Then replace all bare `await callback.answer()` calls with `await safeAnswer(callback)`
-# and `await callback.answer("text", show_alert=True)` with `await safeAnswer(callback, "text", True)`
+from __future__ import annotations
 
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.types import CallbackQuery
+
+# Parse mode constant used everywhere
+PM = "HTML"
+
+
+def b(text: str) -> str:
+    """Bold"""
+    return f"<b>{text}</b>"
+
+
+def i(text: str) -> str:
+    """Italic"""
+    return f"<i>{text}</i>"
+
+
+def c(text: str) -> str:
+    """Code/monospace"""
+    return f"<code>{text}</code>"
+
+
+def hEsc(text: str) -> str:
+    """Escape HTML special characters"""
+    return (
+        str(text)
+        .replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+        .replace('"', "&quot;")
+    )
 
 
 async def safeAnswer(callback: CallbackQuery, text: str = "", show_alert: bool = False) -> None:
@@ -11,8 +38,9 @@ async def safeAnswer(callback: CallbackQuery, text: str = "", show_alert: bool =
     try:
         await callback.answer(text, show_alert=show_alert)
     except TelegramBadRequest as e:
-        if "query is too old" in str(e).lower() or "query id is invalid" in str(e).lower():
-            pass  # expired — ignore
+        err = str(e).lower()
+        if "query is too old" in err or "query id is invalid" in err:
+            pass
         else:
             raise
     except Exception:
