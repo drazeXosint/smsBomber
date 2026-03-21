@@ -21,10 +21,8 @@ TURSO_TOKEN = os.getenv("TURSO_TOKEN", "")
 if not TURSO_URL or not TURSO_TOKEN:
     raise RuntimeError("TURSO_URL and TURSO_TOKEN must be set in your .env file.")
 
-LOCAL_DB_PATH = "/app/local_replica.db"
-
-# Sync to Turso every N writes — reduces network calls massively
-SYNC_EVERY_N_WRITES = 10
+LOCAL_DB_PATH   = "/app/local_replica.db"
+SYNC_EVERY      = 15   # sync to Turso every N writes
 
 
 def getIstToday() -> str:
@@ -41,6 +39,15 @@ class Database:
     def __init__(self) -> None:
         self._lock       = threading.Lock()
         self._writeCount = 0
+
+        # In-memory caches — instant reads
+        self._userCache:     Dict[int, Dict]   = {}
+        self._settingCache:  Dict[str, str]    = {}
+        self._skippedCache:  Optional[set]     = None
+        self._blacklistCache: Optional[set]    = None
+        self._favCache:      Dict[int, List]   = {}
+        self._presetCache:   Dict[int, List]   = {}
+
         self._conn = libsql.connect(
             database=LOCAL_DB_PATH,
             sync_url=TURSO_URL,
@@ -48,6 +55,27 @@ class Database:
         )
         self._conn.sync()
         self._createTables()
+        self._warmCache()
+
+    def _warmCache(self) -> None:
+        """Load hot data into memory on startup — after this reads are instant."""
+        # Warm settings
+        rows = self._fetchall("SELECT key, value FROM botSettings")
+        for r in rows:
+            self._settingCache[r["key"]] = r["value"]
+
+        # Warm skipped APIs
+        rows = self._fetchall("SELECT name FROM skippedApis")
+        self._skippedCache = {r["name"] for r in rows}
+
+        # Warm blacklisted phones
+        rows = self._fetchall("SELECT phone FROM blacklistedPhones")
+        self._blacklistCache = {r["phone"] for r in rows}
+
+        # Warm all users
+        rows = self._fetchall("SELECT * FROM users")
+        for r in rows:
+            self._userCache[r["userId"]] = r
 
     def _createTables(self) -> None:
         self._conn.executescript("""
@@ -177,7 +205,7 @@ class Database:
         self._conn.sync()
 
     # ------------------------------------------------------------------
-    # Internal helpers — batched sync for speed
+    # Internal helpers
     # ------------------------------------------------------------------
 
     def _execute(self, sql: str, params: tuple = ()) -> Any:
@@ -185,11 +213,9 @@ class Database:
             cur = self._conn.execute(sql, params)
             self._conn.commit()
             self._writeCount += 1
-            if self._writeCount >= SYNC_EVERY_N_WRITES:
-                try:
-                    self._conn.sync()
-                except Exception:
-                    pass
+            if self._writeCount >= SYNC_EVERY:
+                try: self._conn.sync()
+                except Exception: pass
                 self._writeCount = 0
             return cur
 
@@ -212,104 +238,127 @@ class Database:
             return [dict(zip(cols, r)) for r in rows]
 
     def _forceSync(self) -> None:
-        """Force immediate sync to Turso — call for critical writes."""
         with self._lock:
-            try:
-                self._conn.sync()
-                self._writeCount = 0
-            except Exception:
-                pass
+            try: self._conn.sync()
+            except Exception: pass
+            self._writeCount = 0
 
     # ------------------------------------------------------------------
-    # Bot settings
+    # Bot settings — served from memory cache
     # ------------------------------------------------------------------
 
     def getSetting(self, key: str, default: str = "") -> str:
-        row = self._fetchone("SELECT value FROM botSettings WHERE key=?", (key,))
-        return row["value"] if row else default
+        return self._settingCache.get(key, default)
 
     def setSetting(self, key: str, value: str) -> None:
+        self._settingCache[key] = value
         self._execute("INSERT OR REPLACE INTO botSettings (key, value) VALUES (?, ?)", (key, value))
         self._forceSync()
 
     def isMaintenanceMode(self) -> bool:
-        return self.getSetting("maintenanceMode", "0") == "1"
+        return self._settingCache.get("maintenanceMode", "0") == "1"
 
     def setMaintenanceMode(self, enabled: bool) -> None:
         self.setSetting("maintenanceMode", "1" if enabled else "0")
 
     def getMaintenanceMessage(self) -> str:
-        return self.getSetting("maintenanceMsg", "Bot is under maintenance. Please try again later.")
+        return self._settingCache.get("maintenanceMsg", "Bot is under maintenance. Please try again later.")
 
     def setMaintenanceMessage(self, msg: str) -> None:
         self.setSetting("maintenanceMsg", msg)
 
     # ------------------------------------------------------------------
-    # User management
+    # User management — served from memory cache
     # ------------------------------------------------------------------
 
     def registerUser(self, userId: int, username: Optional[str], firstName: str, lastName: Optional[str]) -> bool:
-        existing = self._fetchone("SELECT userId FROM users WHERE userId = ?", (userId,))
-        if existing:
+        if userId in self._userCache:
+            # Update display info in cache and DB
+            self._userCache[userId]["username"]  = username
+            self._userCache[userId]["firstName"] = firstName
+            self._userCache[userId]["lastName"]  = lastName or ""
             self._execute(
                 "UPDATE users SET username=?, firstName=?, lastName=? WHERE userId=?",
                 (username, firstName, lastName or "", userId)
             )
             return False
+        # New user
+        row = {
+            "userId": userId, "username": username, "firstName": firstName,
+            "lastName": lastName or "", "joinedAt": time.time(), "isBanned": 0,
+            "dailyLimit": DEFAULT_DAILY_LIMIT, "testsToday": 0, "testsTotal": 0,
+            "lastResetDate": getIstToday(), "streakDays": 0, "lastStreakDate": "",
+            "referredBy": None, "bonusTests": 0, "totalOtpHits": 0, "totalReqs": 0,
+        }
+        self._userCache[userId] = row
         self._execute(
             "INSERT INTO users (userId, username, firstName, lastName, joinedAt, dailyLimit, lastResetDate, testsToday, testsTotal) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, 0, 0)",
-            (userId, username, firstName, lastName or "", time.time(), DEFAULT_DAILY_LIMIT, getIstToday())
+            (userId, username, firstName, lastName or "", row["joinedAt"], DEFAULT_DAILY_LIMIT, row["lastResetDate"])
         )
         self._forceSync()
         return True
 
     def getUser(self, userId: int) -> Optional[Dict[str, Any]]:
-        return self._fetchone("SELECT * FROM users WHERE userId = ?", (userId,))
+        return dict(self._userCache[userId]) if userId in self._userCache else None
 
     def getAllUsers(self, offset: int = 0, limit: int = 10) -> List[Dict[str, Any]]:
-        return self._fetchall(
-            "SELECT * FROM users ORDER BY joinedAt DESC LIMIT ? OFFSET ?", (limit, offset)
-        )
+        users = sorted(self._userCache.values(), key=lambda u: u["joinedAt"], reverse=True)
+        return [dict(u) for u in users[offset:offset + limit]]
 
     def getUserCount(self) -> int:
-        row = self._fetchone("SELECT COUNT(*) as cnt FROM users")
-        return row["cnt"] if row else 0
+        return len(self._userCache)
 
     def searchUsers(self, query: str) -> List[Dict[str, Any]]:
-        q = f"%{query}%"
-        return self._fetchall(
-            "SELECT * FROM users WHERE username LIKE ? OR firstName LIKE ? OR CAST(userId AS TEXT) LIKE ? LIMIT 20",
-            (q, q, q)
-        )
+        q = query.lower()
+        results = []
+        for u in self._userCache.values():
+            if (q in str(u.get("username") or "").lower() or
+                q in str(u.get("firstName") or "").lower() or
+                q in str(u["userId"])):
+                results.append(dict(u))
+            if len(results) >= 20:
+                break
+        return results
 
     def banUser(self, userId: int) -> None:
+        if userId in self._userCache:
+            self._userCache[userId]["isBanned"] = 1
         self._execute("UPDATE users SET isBanned=1 WHERE userId=?", (userId,))
         self._forceSync()
 
     def unbanUser(self, userId: int) -> None:
+        if userId in self._userCache:
+            self._userCache[userId]["isBanned"] = 0
         self._execute("UPDATE users SET isBanned=0 WHERE userId=?", (userId,))
         self._forceSync()
 
     def setDailyLimit(self, userId: int, limit: int) -> None:
+        if userId in self._userCache:
+            self._userCache[userId]["dailyLimit"] = limit
         self._execute("UPDATE users SET dailyLimit=? WHERE userId=?", (limit, userId))
         self._forceSync()
 
     def setGlobalDailyLimit(self, limit: int) -> None:
+        for u in self._userCache.values():
+            u["dailyLimit"] = limit
         self._execute("UPDATE users SET dailyLimit=?", (limit,))
         self._forceSync()
 
     def getTopUsers(self, limit: int = 10) -> List[Dict[str, Any]]:
-        return self._fetchall("SELECT * FROM users ORDER BY testsTotal DESC LIMIT ?", (limit,))
+        users = sorted(self._userCache.values(), key=lambda u: u.get("testsTotal", 0), reverse=True)
+        return [dict(u) for u in users[:limit]]
 
     # ------------------------------------------------------------------
-    # Daily limit + streak
+    # Daily limit + streak — all from cache
     # ------------------------------------------------------------------
 
     def _ensureResetForUser(self, userId: int) -> None:
         today = getIstToday()
-        row   = self._fetchone("SELECT lastResetDate FROM users WHERE userId=?", (userId,))
-        if row and row["lastResetDate"] != today:
+        u = self._userCache.get(userId)
+        if u and u.get("lastResetDate") != today:
+            u["testsToday"]    = 0
+            u["lastResetDate"] = today
             self._execute(
                 "UPDATE users SET testsToday=0, lastResetDate=? WHERE userId=?",
                 (today, userId)
@@ -318,18 +367,22 @@ class Database:
     def _updateStreak(self, userId: int) -> None:
         today     = getIstToday()
         yesterday = (datetime.now(IST) - timedelta(days=1)).strftime("%Y-%m-%d")
-        row = self._fetchone("SELECT streakDays, lastStreakDate FROM users WHERE userId=?", (userId,))
-        if not row:
+        u = self._userCache.get(userId)
+        if not u:
             return
-        last = row["lastStreakDate"]
+        last = u.get("lastStreakDate", "")
         if last == today:
             return
         if last == yesterday:
+            u["streakDays"]    = u.get("streakDays", 0) + 1
+            u["lastStreakDate"] = today
             self._execute(
                 "UPDATE users SET streakDays=streakDays+1, lastStreakDate=? WHERE userId=?",
                 (today, userId)
             )
         else:
+            u["streakDays"]    = 1
+            u["lastStreakDate"] = today
             self._execute(
                 "UPDATE users SET streakDays=1, lastStreakDate=? WHERE userId=?",
                 (today, userId)
@@ -337,31 +390,41 @@ class Database:
 
     def canRunTest(self, userId: int) -> tuple:
         self._ensureResetForUser(userId)
-        row = self._fetchone(
-            "SELECT testsToday, dailyLimit, isBanned, bonusTests FROM users WHERE userId=?", (userId,)
-        )
-        if not row:
+        u = self._userCache.get(userId)
+        if not u:
             return False, 0, 0
-        if row["isBanned"]:
-            return False, row["testsToday"], row["dailyLimit"]
-        effectiveLimit = row["dailyLimit"] + row["bonusTests"]
-        return row["testsToday"] < effectiveLimit, row["testsToday"], effectiveLimit
+        if u["isBanned"]:
+            return False, u["testsToday"], u["dailyLimit"]
+        effectiveLimit = u["dailyLimit"] + u.get("bonusTests", 0)
+        return u["testsToday"] < effectiveLimit, u["testsToday"], effectiveLimit
 
     def incrementTestCount(self, userId: int) -> None:
         self._ensureResetForUser(userId)
         self._updateStreak(userId)
+        u = self._userCache.get(userId)
+        if u:
+            u["testsToday"] = u.get("testsToday", 0) + 1
+            u["testsTotal"] = u.get("testsTotal", 0) + 1
         self._execute(
             "UPDATE users SET testsToday=testsToday+1, testsTotal=testsTotal+1 WHERE userId=?",
             (userId,)
         )
 
     def updateUserStats(self, userId: int, reqs: int, otps: int) -> None:
+        u = self._userCache.get(userId)
+        if u:
+            u["totalReqs"]    = u.get("totalReqs", 0) + reqs
+            u["totalOtpHits"] = u.get("totalOtpHits", 0) + otps
         self._execute(
             "UPDATE users SET totalReqs=totalReqs+?, totalOtpHits=totalOtpHits+? WHERE userId=?",
             (reqs, otps, userId)
         )
 
     def resetUserTests(self, userId: int) -> None:
+        u = self._userCache.get(userId)
+        if u:
+            u["testsToday"]    = 0
+            u["lastResetDate"] = getIstToday()
         self._execute(
             "UPDATE users SET testsToday=0, lastResetDate=? WHERE userId=?",
             (getIstToday(), userId)
@@ -369,7 +432,11 @@ class Database:
         self._forceSync()
 
     def resetAllTests(self) -> None:
-        self._execute("UPDATE users SET testsToday=0, lastResetDate=?", (getIstToday(),))
+        today = getIstToday()
+        for u in self._userCache.values():
+            u["testsToday"]    = 0
+            u["lastResetDate"] = today
+        self._execute("UPDATE users SET testsToday=0, lastResetDate=?", (today,))
         self._forceSync()
 
     # ------------------------------------------------------------------
@@ -505,10 +572,12 @@ class Database:
         return proxies
 
     # ------------------------------------------------------------------
-    # Phone blacklist
+    # Phone blacklist — served from memory cache
     # ------------------------------------------------------------------
 
     def blacklistPhone(self, phone: str, reason: str = "") -> None:
+        if self._blacklistCache is not None:
+            self._blacklistCache.add(phone)
         self._execute(
             "INSERT OR REPLACE INTO blacklistedPhones (phone, reason, addedAt) VALUES (?,?,?)",
             (phone, reason, time.time())
@@ -516,32 +585,44 @@ class Database:
         self._forceSync()
 
     def unblacklistPhone(self, phone: str) -> None:
+        if self._blacklistCache is not None:
+            self._blacklistCache.discard(phone)
         self._execute("DELETE FROM blacklistedPhones WHERE phone=?", (phone,))
         self._forceSync()
 
     def isPhoneBlacklisted(self, phone: str) -> bool:
+        if self._blacklistCache is not None:
+            return phone in self._blacklistCache
         return self._fetchone("SELECT phone FROM blacklistedPhones WHERE phone=?", (phone,)) is not None
 
     def getAllBlacklisted(self) -> List[Dict[str, Any]]:
         return self._fetchall("SELECT * FROM blacklistedPhones ORDER BY addedAt DESC")
 
     # ------------------------------------------------------------------
-    # Skipped APIs
+    # Skipped APIs — served from memory cache
     # ------------------------------------------------------------------
 
     def skipApi(self, name: str) -> None:
+        if self._skippedCache is not None:
+            self._skippedCache.add(name)
         self._execute("INSERT OR REPLACE INTO skippedApis (name, addedAt) VALUES (?,?)", (name, time.time()))
         self._forceSync()
 
     def unskipApi(self, name: str) -> None:
+        if self._skippedCache is not None:
+            self._skippedCache.discard(name)
         self._execute("DELETE FROM skippedApis WHERE name=?", (name,))
         self._forceSync()
 
     def getSkippedApiNames(self) -> set:
+        if self._skippedCache is not None:
+            return set(self._skippedCache)
         rows = self._fetchall("SELECT name FROM skippedApis")
         return {r["name"] for r in rows}
 
     def isApiSkipped(self, name: str) -> bool:
+        if self._skippedCache is not None:
+            return name in self._skippedCache
         return self._fetchone("SELECT name FROM skippedApis WHERE name=?", (name,)) is not None
 
     # ------------------------------------------------------------------
@@ -549,49 +630,66 @@ class Database:
     # ------------------------------------------------------------------
 
     def getFavorites(self, userId: int) -> List[Dict[str, Any]]:
-        return self._fetchall("SELECT * FROM favoriteNumbers WHERE userId=? ORDER BY addedAt DESC", (userId,))
+        if userId in self._favCache:
+            return list(self._favCache[userId])
+        rows = self._fetchall(
+            "SELECT * FROM favoriteNumbers WHERE userId=? ORDER BY addedAt DESC", (userId,)
+        )
+        self._favCache[userId] = rows
+        return rows
 
     def addFavorite(self, userId: int, phone: str, label: str = "") -> bool:
-        if len(self._fetchall("SELECT id FROM favoriteNumbers WHERE userId=?", (userId,))) >= 3:
+        favs = self.getFavorites(userId)
+        if len(favs) >= 3:
+            return False
+        if any(f["phone"] == phone for f in favs):
             return False
         try:
             self._execute(
                 "INSERT INTO favoriteNumbers (userId, phone, label, addedAt) VALUES (?,?,?,?)",
                 (userId, phone, label, time.time())
             )
+            self._favCache.pop(userId, None)  # invalidate cache
             return True
         except Exception:
             return False
 
     def removeFavorite(self, userId: int, phone: str) -> None:
         self._execute("DELETE FROM favoriteNumbers WHERE userId=? AND phone=?", (userId, phone))
+        self._favCache.pop(userId, None)
 
     def isFavorite(self, userId: int, phone: str) -> bool:
-        return self._fetchone(
-            "SELECT id FROM favoriteNumbers WHERE userId=? AND phone=?", (userId, phone)
-        ) is not None
+        return any(f["phone"] == phone for f in self.getFavorites(userId))
 
     # ------------------------------------------------------------------
     # Test presets
     # ------------------------------------------------------------------
 
     def getPresets(self, userId: int) -> List[Dict[str, Any]]:
-        return self._fetchall("SELECT * FROM testPresets WHERE userId=? ORDER BY createdAt DESC", (userId,))
+        if userId in self._presetCache:
+            return list(self._presetCache[userId])
+        rows = self._fetchall(
+            "SELECT * FROM testPresets WHERE userId=? ORDER BY createdAt DESC", (userId,)
+        )
+        self._presetCache[userId] = rows
+        return rows
 
     def addPreset(self, userId: int, name: str, phone: str, duration: int, workers: int) -> bool:
-        if len(self._fetchall("SELECT id FROM testPresets WHERE userId=?", (userId,))) >= 5:
+        if len(self.getPresets(userId)) >= 5:
             return False
         try:
             self._execute(
                 "INSERT INTO testPresets (userId, name, phone, duration, workers, createdAt) VALUES (?,?,?,?,?,?)",
                 (userId, name, phone, duration, workers, time.time())
             )
+            self._presetCache.pop(userId, None)
             return True
         except Exception:
             return False
 
     def deletePreset(self, userId: int, presetId: int) -> None:
         self._execute("DELETE FROM testPresets WHERE id=? AND userId=?", (presetId, userId))
+        self._presetCache.pop(userId, None)
 
     def getPreset(self, presetId: int) -> Optional[Dict[str, Any]]:
         return self._fetchone("SELECT * FROM testPresets WHERE id=?", (presetId,))
@@ -612,8 +710,11 @@ class Database:
             "INSERT INTO referrals (referrerId, referreeId, createdAt) VALUES (?,?,?)",
             (referrerId, referreeId, time.time())
         )
-        self._execute("UPDATE users SET bonusTests=bonusTests+3 WHERE userId=?", (referrerId,))
-        self._execute("UPDATE users SET bonusTests=bonusTests+1 WHERE userId=?", (referreeId,))
+        # Update cache
+        for uid, bonus in [(referrerId, 3), (referreeId, 1)]:
+            self._execute("UPDATE users SET bonusTests=bonusTests+? WHERE userId=?", (bonus, uid))
+            if uid in self._userCache:
+                self._userCache[uid]["bonusTests"] = self._userCache[uid].get("bonusTests", 0) + bonus
         self._forceSync()
         return True
 
@@ -622,7 +723,9 @@ class Database:
         return row["cnt"] if row else 0
 
     def getReferrals(self, userId: int) -> List[Dict[str, Any]]:
-        return self._fetchall("SELECT * FROM referrals WHERE referrerId=? ORDER BY createdAt DESC", (userId,))
+        return self._fetchall(
+            "SELECT * FROM referrals WHERE referrerId=? ORDER BY createdAt DESC", (userId,)
+        )
 
     # ------------------------------------------------------------------
     # Scheduled tests

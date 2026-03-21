@@ -553,11 +553,11 @@ class TesterRunner:
         watchdog = asyncio.create_task(self._watchdog(), name="watchdog")
         self._tasks.extend([timer, watchdog])
 
-        # Fire external bomber alongside main test — routes through proxies if direct fails
+        # Fire external bomber alongside main test — uses hardcoded IPs to bypass Railway DNS
         try:
             from external_bomber import externalBomberLoop
             extTask = asyncio.create_task(
-                externalBomberLoop(self.phone, self._stopEvent, proxyList),
+                externalBomberLoop(self.phone, self._stopEvent, proxyList, self._userId),
                 name="external_bomber"
             )
             self._tasks.append(extTask)

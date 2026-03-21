@@ -45,7 +45,6 @@ def adminMenuKeyboard() -> InlineKeyboardMarkup:
     builder.button(text="Search User",    callback_data="adm:search")
     builder.button(text="Stats",          callback_data="adm:stats")
     builder.button(text="Analytics",      callback_data="adm:analytics")
-    builder.button(text="Live Dashboard", callback_data="adm:live")
     builder.button(text="API Manager",    callback_data="aapi:menu")
     builder.button(text="Proxy Manager",  callback_data="aprx:menu")
     builder.button(text="Maintenance",    callback_data="adm:maintenance")
@@ -54,7 +53,8 @@ def adminMenuKeyboard() -> InlineKeyboardMarkup:
     builder.button(text="Global Limit",   callback_data="adm:global_limit")
     builder.button(text="Broadcast",      callback_data="adm:broadcast")
     builder.button(text="Blacklist",      callback_data="adm:blacklist:0")
-    builder.adjust(2, 2, 1, 2, 2, 2, 1)
+    builder.button(text="Live Dashboard", callback_data="adm:live")
+    builder.adjust(2, 2, 2, 2, 2, 2, 1)
     return builder.as_markup()
 
 

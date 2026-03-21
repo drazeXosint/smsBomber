@@ -102,7 +102,7 @@ def buildConfirmText(data: dict, proxyInfo: str = "") -> str:
     )
 
 
-def buildDashboardText(snap: dict, phone: str, duration: int) -> str:
+def buildDashboardText(snap: dict, phone: str, duration: int, userId: int = 0) -> str:
     elapsed    = snap["elapsed"]
     lines      = []
     rl_count   = 0
@@ -143,6 +143,17 @@ def buildDashboardText(snap: dict, phone: str, duration: int) -> str:
     if dead_count: status_bits.append(f"Dead {dead_count}")
     status_str = "  [ " + "  ".join(status_bits) + " ]" if status_bits else ""
 
+    # External bomber status
+    try:
+        from external_bomber import bomberStatus
+        bStatus = bomberStatus.get(userId)
+        if bStatus and bStatus.get("active"):
+            extLine = f"\nExtBomber   {c('ACTIVE')}  {bStatus.get('hits', 0)} hits"
+        else:
+            extLine = f"\nExtBomber   {i('connecting...')}"
+    except Exception:
+        extLine = ""
+
     return (
         f"{b('Test Running')}  {c(phone)}\n"
         f"<code>{bar}</code>  {c(f'{int(pct*100)}%')}  {i(f'{int(elapsed)}s / {duration}s')}\n\n"
@@ -150,7 +161,8 @@ def buildDashboardText(snap: dict, phone: str, duration: int) -> str:
         f"Requests    {c(str(totalReqs))}  {i(rps_str + ' r/s')}\n"
         f"Confirmed   {c(str(confirmed))}\n"
         f"2xx Total   {c(str(responses))}\n"
-        f"Errors      {c(str(snap['errors']))}{status_str}\n\n"
+        f"Errors      {c(str(snap['errors']))}{status_str}"
+        f"{extLine}\n\n"
         f"{b('APIs')}\n{apiBlock}"
     )
 
@@ -195,7 +207,7 @@ async def dashboardLoop(runner, message, phone, duration, userId, state):
     while runner.isRunning:
         await asyncio.sleep(DASHBOARD_UPDATE_INTERVAL)
         snap    = runner.stats.snapshot()
-        newText = buildDashboardText(snap, phone, duration)
+        newText = buildDashboardText(snap, phone, duration, userId)
         if newText != lastText:
             try:
                 await message.edit_text(newText, reply_markup=runningKeyboard(), parse_mode=PM)
