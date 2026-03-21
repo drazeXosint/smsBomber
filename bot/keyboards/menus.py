@@ -53,10 +53,11 @@ def proxyKeyboard(hasProxies: bool) -> InlineKeyboardMarkup:
 
 def confirmKeyboard() -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
-    builder.button(text="Launch",  callback_data="confirm:start")
-    builder.button(text="Edit",    callback_data="confirm:edit")
-    builder.button(text="Cancel",  callback_data="confirm:cancel")
-    builder.adjust(2, 1)
+    builder.button(text="Launch",       callback_data="confirm:start")
+    builder.button(text="Edit",         callback_data="confirm:edit")
+    builder.button(text="Nuke Mode: OFF", callback_data="confirm:nuke_toggle")
+    builder.button(text="Cancel",       callback_data="confirm:cancel")
+    builder.adjust(2, 1, 1)
     return builder.as_markup()
 
 

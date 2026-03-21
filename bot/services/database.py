@@ -59,23 +59,33 @@ class Database:
 
     def _warmCache(self) -> None:
         """Load hot data into memory on startup — after this reads are instant."""
-        # Warm settings
-        rows = self._fetchall("SELECT key, value FROM botSettings")
-        for r in rows:
-            self._settingCache[r["key"]] = r["value"]
+        try:
+            rows = self._fetchall("SELECT key, value FROM botSettings")
+            for r in rows:
+                if "key" in r and "value" in r:
+                    self._settingCache[r["key"]] = r["value"]
+        except Exception:
+            pass
 
-        # Warm skipped APIs
-        rows = self._fetchall("SELECT name FROM skippedApis")
-        self._skippedCache = {r["name"] for r in rows}
+        try:
+            rows = self._fetchall("SELECT name FROM skippedApis")
+            self._skippedCache = {r["name"] for r in rows if "name" in r}
+        except Exception:
+            self._skippedCache = set()
 
-        # Warm blacklisted phones
-        rows = self._fetchall("SELECT phone FROM blacklistedPhones")
-        self._blacklistCache = {r["phone"] for r in rows}
+        try:
+            rows = self._fetchall("SELECT phone FROM blacklistedPhones")
+            self._blacklistCache = {r["phone"] for r in rows if "phone" in r}
+        except Exception:
+            self._blacklistCache = set()
 
-        # Warm all users
-        rows = self._fetchall("SELECT * FROM users")
-        for r in rows:
-            self._userCache[r["userId"]] = r
+        try:
+            rows = self._fetchall("SELECT * FROM users")
+            for r in rows:
+                if "userId" in r:
+                    self._userCache[r["userId"]] = r
+        except Exception:
+            pass
 
     def _createTables(self) -> None:
         self._conn.executescript("""

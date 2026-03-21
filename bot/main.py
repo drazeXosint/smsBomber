@@ -10,7 +10,7 @@ from aiohttp import web
 
 from bot.config import BOT_TOKEN
 from bot.handlers import start, test_flow, dashboard, admin
-from bot.handlers import admin_apis, admin_proxy, user_features, admin_features, schedule_handler, live_dashboard
+from bot.handlers import admin_apis, admin_proxy, user_features, admin_features, schedule_handler, live_dashboard, nuke_handler
 from bot.middleware.auth import AuthMiddleware
 from bot.services.scheduler import midnightResetLoop, scheduledTestsLoop
 
@@ -41,6 +41,7 @@ def registerRouters(dp: Dispatcher) -> None:
     dp.include_router(admin_features.router)
     dp.include_router(schedule_handler.router)
     dp.include_router(live_dashboard.router)
+    dp.include_router(nuke_handler.router)
 
 
 async def onStartup(bot: Bot) -> None:

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from typing import Dict, Optional
+from typing import Optional
 
 from aiogram import Router, F
 from aiogram.filters import StateFilter
@@ -26,7 +26,6 @@ from datetime import datetime
 
 router = Router()
 
-# Use plain dict to avoid type annotation issues
 activeRunners:   dict = {}
 dashboardTasks:  dict = {}
 summaryShown:    dict = {}
@@ -75,6 +74,12 @@ def parseTime(t: str) -> Optional[int]:
         return None
 
 
+def parsePhones(text: str) -> list:
+    """Parse single or multiple comma-separated 10-digit numbers."""
+    parts = [p.strip() for p in text.replace("،", ",").split(",")]
+    return [p for p in parts if p.isdigit() and len(p) == 10]
+
+
 def durationText(phone: str) -> str:
     return (
         f"{b('Step 1 of 2')}  {c(phone)}\n\n"
@@ -92,9 +97,13 @@ def workersText(phone: str, duration: int) -> str:
 
 def buildConfirmText(data: dict, proxyInfo: str = "") -> str:
     proxyLabel = proxyInfo if proxyInfo else ("Proxy" if data.get("useProxy") else "Direct")
+    phones     = data.get("phones", [data.get("phone", "")])
+    phoneStr   = ", ".join(phones) if len(phones) > 1 else phones[0] if phones else data.get("phone", "")
+    nukeStr    = f"\n{b('NUKE MODE')}  {c('MAX DESTRUCTION')}" if data.get("nukeMode") else ""
     return (
-        f"{b('Ready to Launch')}\n\n"
-        f"Phone      {c(data['phone'])}\n"
+        f"{b('Ready to Launch')}{nukeStr}\n\n"
+        f"Phone{'s' if len(phones) > 1 else ''}   {c(hEsc(phoneStr))}\n"
+        f"Targets    {c(str(len(phones)))}\n"
         f"Duration   {c(formatDuration(data['duration']))}\n"
         f"Workers    {c(str(data['workers']))}\n"
         f"Proxy      {c(proxyLabel)}\n\n"
@@ -102,7 +111,7 @@ def buildConfirmText(data: dict, proxyInfo: str = "") -> str:
     )
 
 
-def buildDashboardText(snap: dict, phone: str, duration: int, userId: int = 0) -> str:
+def buildDashboardText(snap: dict, phones: list, duration: int) -> str:
     elapsed    = snap["elapsed"]
     lines      = []
     rl_count   = 0
@@ -114,9 +123,9 @@ def buildDashboardText(snap: dict, phone: str, duration: int, userId: int = 0) -
         elif s.get("status") == "dead":
             dead_count += 1
         if s.get("requests", 0) > 0:
-            conf = s.get("confirmed", 0)
-            req  = s["requests"]
-            ms   = s["avgMs"]
+            conf       = s.get("confirmed", 0)
+            req        = s["requests"]
+            ms         = s["avgMs"]
             status_tag = " [RL]" if s.get("status") == "ratelimited" else (" [D]" if s.get("status") == "dead" else "")
             lines.append(
                 f"<code>{hEsc(name[:14]):<14}</code>{status_tag}  "
@@ -132,42 +141,32 @@ def buildDashboardText(snap: dict, phone: str, duration: int, userId: int = 0) -
     bar_filled = int(bar_total * pct)
     bar        = "█" * bar_filled + "░" * (bar_total - bar_filled)
 
-    totalReqs = snap.get("totalReqs", snap.get("total", 0))
-    confirmed = snap.get("confirmed", snap.get("otpSent", 0))
-    responses = snap.get("responses", 0)
-    remaining = max(0, duration - int(elapsed))
-    rps_str   = str(snap["rps"])
+    totalReqs  = snap.get("totalReqs", 0)
+    confirmed  = snap.get("confirmed", 0)
+    responses  = snap.get("responses", 0)
+    remaining  = max(0, duration - int(elapsed))
+    rps_str    = str(snap["rps"])
 
     status_bits = []
     if rl_count:   status_bits.append(f"RL {rl_count}")
     if dead_count: status_bits.append(f"Dead {dead_count}")
     status_str = "  [ " + "  ".join(status_bits) + " ]" if status_bits else ""
 
-    # External bomber status
-    try:
-        from external_bomber import bomberStatus
-        bStatus = bomberStatus.get(userId)
-        if bStatus and bStatus.get("active"):
-            extLine = f"\nExtBomber   {c('ACTIVE')}  {bStatus.get('hits', 0)} hits"
-        else:
-            extLine = f"\nExtBomber   {i('connecting...')}"
-    except Exception:
-        extLine = ""
+    phoneDisplay = ", ".join(phones) if len(phones) <= 3 else f"{phones[0]} +{len(phones)-1} more"
 
     return (
-        f"{b('Test Running')}  {c(phone)}\n"
+        f"{b('Test Running')}  {c(hEsc(phoneDisplay))}\n"
         f"<code>{bar}</code>  {c(f'{int(pct*100)}%')}  {i(f'{int(elapsed)}s / {duration}s')}\n\n"
         f"Remaining   {c(formatDuration(remaining))}\n"
         f"Requests    {c(str(totalReqs))}  {i(rps_str + ' r/s')}\n"
         f"Confirmed   {c(str(confirmed))}\n"
         f"2xx Total   {c(str(responses))}\n"
-        f"Errors      {c(str(snap['errors']))}{status_str}"
-        f"{extLine}\n\n"
+        f"Errors      {c(str(snap['errors']))}{status_str}\n\n"
         f"{b('APIs')}\n{apiBlock}"
     )
 
 
-def buildSummaryText(snap: dict, phone: str) -> str:
+def buildSummaryText(snap: dict, phones: list) -> str:
     sortedApis = sorted(
         snap["perApi"].items(),
         key=lambda x: (x[1].get("confirmed", 0), x[1].get("responses", 0)),
@@ -183,31 +182,31 @@ def buildSummaryText(snap: dict, phone: str) -> str:
                 f"{s['requests']} req"
             )
 
-    topBlock  = "\n".join(topLines) if topLines else i("No responses recorded.")
-    elapsed   = int(snap["elapsed"])
-    totalReqs = snap.get("totalReqs", snap.get("total", 0))
-    confirmed = snap.get("confirmed", snap.get("otpSent", 0))
-    responses = snap.get("responses", 0)
+    topBlock      = "\n".join(topLines) if topLines else i("No responses recorded.")
+    elapsed       = int(snap["elapsed"])
+    totalReqs     = snap.get("totalReqs", 0)
+    confirmed     = snap.get("confirmed", 0)
+    phoneDisplay  = ", ".join(phones) if len(phones) <= 3 else f"{phones[0]} +{len(phones)-1} more"
 
     return (
         f"{b('Test Complete')}\n"
-        f"{c(phone)}\n\n"
+        f"{c(hEsc(phoneDisplay))}\n\n"
         f"Duration    {c(formatDuration(elapsed))}\n"
         f"Requests    {c(str(totalReqs))}\n"
         f"Confirmed   {c(str(confirmed))}\n"
-        f"2xx Total   {c(str(responses))}\n"
+        f"2xx Total   {c(str(snap['responses']))}\n"
         f"Errors      {c(str(snap['errors']))}\n"
         f"Req/sec     {c(str(snap['rps']))}\n\n"
         f"{b('Top APIs')}\n{topBlock}"
     )
 
 
-async def dashboardLoop(runner, message, phone, duration, userId, state):
+async def dashboardLoop(runner, message, phones, duration, userId, state):
     lastText = ""
     while runner.isRunning:
         await asyncio.sleep(DASHBOARD_UPDATE_INTERVAL)
         snap    = runner.stats.snapshot()
-        newText = buildDashboardText(snap, phone, duration, userId)
+        newText = buildDashboardText(snap, phones, duration)
         if newText != lastText:
             try:
                 await message.edit_text(newText, reply_markup=runningKeyboard(), parse_mode=PM)
@@ -220,21 +219,20 @@ async def dashboardLoop(runner, message, phone, duration, userId, state):
         snap = runner.stats.snapshot()
         _saveHistory(userId, snap)
         _lastConfig[userId] = {
-            "phone":    runner.phone,
+            "phone":    runner.phones[0],
+            "phones":   runner.phones,
             "duration": runner.duration,
             "workers":  runner.workers,
         }
         try:
             await message.edit_text(
-                buildSummaryText(snap, phone),
-                reply_markup=finishedKeyboard(),
-                parse_mode=PM
+                buildSummaryText(snap, phones),
+                reply_markup=finishedKeyboard(), parse_mode=PM
             )
         except Exception:
             await message.answer(
-                buildSummaryText(snap, phone),
-                reply_markup=finishedKeyboard(),
-                parse_mode=PM
+                buildSummaryText(snap, phones),
+                reply_markup=finishedKeyboard(), parse_mode=PM
             )
 
     activeRunners.pop(userId, None)
@@ -258,8 +256,8 @@ def _saveHistory(userId, snap):
                 for name, s in snap.get("perApi", {}).items()
                 if s.get("requests", 0) > 0
             })
-            totalReqs = snap.get("totalReqs", snap.get("total", 0))
-            otpHits   = snap.get("confirmed", snap.get("otpSent", 0))
+            totalReqs = snap.get("totalReqs", 0)
+            otpHits   = snap.get("confirmed", 0)
             db.finishTestRecord(
                 recordId=recordId,
                 totalReqs=totalReqs,
@@ -313,20 +311,23 @@ async def cbStartTest(callback: CallbackQuery, state: FSMContext) -> None:
     await state.clear()
     await state.set_state(TestWizard.phone)
 
-    # Build keyboard with favorites as quick-pick buttons
     favs    = db.getFavorites(userId)
     builder = InlineKeyboardBuilder()
     if favs:
         for f in favs:
             label = f["label"] or f["phone"]
             builder.button(text=label, callback_data=f"startfav:{f['phone']}")
-        builder.adjust(1)
     builder.button(text="Back", callback_data="nav:main_menu")
     builder.adjust(*([1] * len(favs)), 1)
 
-    text = f"{b('Start Test')}\n\nEnter the 10-digit target number.\n{i('Example: 9876543210')}"
+    text = (
+        f"{b('Start Test')}\n\n"
+        f"Enter target number(s).\n"
+        f"{i('Single: 9876543210')}\n"
+        f"{i('Multi: 9876543210, 9876543211, 9876543212')}"
+    )
     if favs:
-        text += f"\n\n{i('Or pick a saved favorite below:')}"
+        text += f"\n\n{i('Or pick a saved favorite:')}"
 
     await callback.message.edit_text(text, reply_markup=builder.as_markup(), parse_mode=PM)
     await callback.answer()
@@ -342,12 +343,10 @@ async def cbStartFromFavorite(callback: CallbackQuery, state: FSMContext) -> Non
     if db.isPhoneBlacklisted(phone) and userId != ADMIN_ID:
         await callback.answer("That number is not available for testing.", show_alert=True)
         return
-    await state.update_data(phone=phone)
+    await state.update_data(phone=phone, phones=[phone])
     await state.set_state(TestWizard.duration)
     await callback.message.edit_text(
-        durationText(phone),
-        reply_markup=durationKeyboard(),
-        parse_mode=PM
+        durationText(phone), reply_markup=durationKeyboard(), parse_mode=PM
     )
     await callback.answer()
 
@@ -358,25 +357,42 @@ async def cbStartFromFavorite(callback: CallbackQuery, state: FSMContext) -> Non
 
 @router.message(StateFilter(TestWizard.phone))
 async def handlePhone(message: Message, state: FSMContext) -> None:
-    phone = (message.text or "").strip()
-    if not phone.isdigit() or len(phone) != 10:
+    userId = message.from_user.id
+    phones = parsePhones(message.text or "")
+
+    if not phones:
         await message.answer(
-            f"{b('Invalid')}  Must be exactly 10 digits.\n{i('Example: 9876543210')}",
+            f"{b('Invalid')}\n\n"
+            f"Enter one or more 10-digit numbers.\n"
+            f"{i('Single: 9876543210')}\n"
+            f"{i('Multi: 9876543210, 9876543211')}",
             parse_mode=PM
         )
         return
-    if phone == PROTECTED_NUMBER and message.from_user.id != ADMIN_ID:
-        await message.answer(random.choice(PROTECTED_RESPONSES))
-        return
-    if db.isPhoneBlacklisted(phone) and message.from_user.id != ADMIN_ID:
-        await message.answer("That number is not available for testing.")
-        return
-    await state.update_data(phone=phone)
+
+    # Filter protected/blacklisted
+    if userId != ADMIN_ID:
+        if PROTECTED_NUMBER in phones:
+            await message.answer(random.choice(PROTECTED_RESPONSES))
+            return
+        phones = [p for p in phones if not db.isPhoneBlacklisted(p)]
+        if not phones:
+            await message.answer("All entered numbers are blacklisted.")
+            return
+
+    # Cap at 5 numbers for non-admin
+    if userId != ADMIN_ID and len(phones) > 5:
+        phones = phones[:5]
+
+    primaryPhone = phones[0]
+    await state.update_data(phone=primaryPhone, phones=phones)
     await state.set_state(TestWizard.duration)
+
+    phoneStr = ", ".join(phones) if len(phones) > 1 else primaryPhone
+    infoStr  = f" {i(f'({len(phones)} targets)')}" if len(phones) > 1 else ""
     await message.answer(
-        durationText(phone),
-        reply_markup=durationKeyboard(),
-        parse_mode=PM
+        f"{b('Step 1 of 2')}  {c(hEsc(phoneStr))}{infoStr}\n\nSelect test duration.",
+        reply_markup=durationKeyboard(), parse_mode=PM
     )
 
 
@@ -401,9 +417,8 @@ async def cbDuration(callback: CallbackQuery, state: FSMContext) -> None:
     await state.update_data(duration=int(value))
     await state.set_state(TestWizard.workers)
     await callback.message.edit_text(
-        workersText(data["phone"], int(value)),
-        reply_markup=workersKeyboard(),
-        parse_mode=PM
+        workersText(data.get("phone", ""), int(value)),
+        reply_markup=workersKeyboard(), parse_mode=PM
     )
     await callback.answer(f"Duration: {formatDuration(int(value))}")
 
@@ -421,9 +436,8 @@ async def handleDurationCustom(message: Message, state: FSMContext) -> None:
     await state.update_data(duration=seconds)
     await state.set_state(TestWizard.workers)
     await message.answer(
-        workersText(data["phone"], seconds),
-        reply_markup=workersKeyboard(),
-        parse_mode=PM
+        workersText(data.get("phone", ""), seconds),
+        reply_markup=workersKeyboard(), parse_mode=PM
     )
 
 
@@ -432,9 +446,8 @@ async def cbBackToDuration(callback: CallbackQuery, state: FSMContext) -> None:
     await state.set_state(TestWizard.duration)
     data = await state.get_data()
     await callback.message.edit_text(
-        durationText(data["phone"]),
-        reply_markup=durationKeyboard(),
-        parse_mode=PM
+        durationText(data.get("phone", "")),
+        reply_markup=durationKeyboard(), parse_mode=PM
     )
     await callback.answer()
 
@@ -456,7 +469,6 @@ async def cbWorkers(callback: CallbackQuery, state: FSMContext) -> None:
         )
         await callback.answer()
         return
-    data = await state.get_data()
     await state.update_data(workers=int(value))
     await state.set_state(TestWizard.proxy)
     hasProxies = proxyManager.hasProxies()
@@ -490,9 +502,8 @@ async def cbBackToWorkers(callback: CallbackQuery, state: FSMContext) -> None:
     await state.set_state(TestWizard.workers)
     data = await state.get_data()
     await callback.message.edit_text(
-        workersText(data["phone"], data.get("duration", 0)),
-        reply_markup=workersKeyboard(),
-        parse_mode=PM
+        workersText(data.get("phone", ""), data.get("duration", 0)),
+        reply_markup=workersKeyboard(), parse_mode=PM
     )
     await callback.answer()
 
@@ -537,8 +548,7 @@ async def cbProxy(callback: CallbackQuery, state: FSMContext) -> None:
         data = await state.get_data()
         await state.set_state(TestWizard.confirm)
         await callback.message.edit_text(
-            buildConfirmText(data),
-            reply_markup=confirmKeyboard(), parse_mode=PM
+            buildConfirmText(data), reply_markup=confirmKeyboard(), parse_mode=PM
         )
         await callback.answer()
 
@@ -552,9 +562,8 @@ async def cbConfirmEdit(callback: CallbackQuery, state: FSMContext) -> None:
     await state.set_state(TestWizard.workers)
     data = await state.get_data()
     await callback.message.edit_text(
-        workersText(data["phone"], data.get("duration", 0)),
-        reply_markup=workersKeyboard(),
-        parse_mode=PM
+        workersText(data.get("phone", ""), data.get("duration", 0)),
+        reply_markup=workersKeyboard(), parse_mode=PM
     )
     await callback.answer()
 
@@ -586,11 +595,67 @@ async def cbConfirmStart(callback: CallbackQuery, state: FSMContext) -> None:
 
     data           = await state.get_data()
     await state.set_state(TestWizard.running)
-    phone          = data["phone"]
+    phones         = data.get("phones", [data.get("phone", "")])
+    phone          = phones[0]
     duration       = data["duration"]
     workers        = data["workers"]
     useProxy       = data.get("useProxy", False)
     workingProxies = data.get("workingProxies", [])
+    nukeMode       = data.get("nukeMode", False)
+
+    db.incrementTestCount(userId)
+    recordId = db.startTestRecord(userId, phone, duration, workers)
+    activeRecordIds[userId] = recordId
+
+    runner = TesterRunner(
+        phone=",".join(phones),
+        duration=duration,
+        workers=workers,
+        useProxy=useProxy,
+        proxyList=workingProxies,
+        userId=userId,
+        bot=callback.bot,
+        nukeMode=nukeMode,
+    )
+    activeRunners[userId] = runner
+    summaryShown[userId]  = False
+
+    _, testsNow, limitNow = db.canRunTest(userId)
+    nukeStr = f"  {b('NUKE MODE')}" if nukeMode else ""
+    phoneDisplay = ", ".join(phones) if len(phones) <= 3 else f"{phone} +{len(phones)-1} more"
+    dashMsg = await callback.message.edit_text(
+        f"{b('Test Running')}{nukeStr}  {c(hEsc(phoneDisplay))}\n\n"
+        f"{i('Initializing burst...')}\n\n"
+        f"{c(f'Tests today: {testsNow}/{limitNow}')}",
+        reply_markup=runningKeyboard(), parse_mode=PM
+    )
+    await callback.answer()
+    await runner.start()
+    task = asyncio.create_task(
+        dashboardLoop(runner, dashMsg, phones, duration, userId, state)
+    )
+    dashboardTasks[userId] = task
+
+
+# ---------------------------------------------------------------------------
+# Nuke mode launch (admin only, from callback)
+# ---------------------------------------------------------------------------
+
+@router.callback_query(F.data.startswith("nuke:launch:"))
+async def cbNukeLaunch(callback: CallbackQuery, state: FSMContext) -> None:
+    from bot.config import ADMIN_ID
+    if callback.from_user.id != ADMIN_ID:
+        await callback.answer("Access denied.", show_alert=True)
+        return
+    phone  = callback.data.split(":", 2)[2]
+    userId = callback.from_user.id
+    if userId in activeRunners:
+        await callback.answer("Already running. Stop it first.", show_alert=True)
+        return
+
+    await state.set_state(TestWizard.running)
+    duration = 300  # 5 min nuke
+    workers  = 64
 
     db.incrementTestCount(userId)
     recordId = db.startTestRecord(userId, phone, duration, workers)
@@ -598,21 +663,25 @@ async def cbConfirmStart(callback: CallbackQuery, state: FSMContext) -> None:
 
     runner = TesterRunner(
         phone=phone, duration=duration, workers=workers,
-        useProxy=useProxy, proxyList=workingProxies,
-        userId=userId, bot=callback.bot,
+        useProxy=False, userId=userId, bot=callback.bot,
+        nukeMode=True,
     )
     activeRunners[userId] = runner
     summaryShown[userId]  = False
 
-    _, testsNow, limitNow = db.canRunTest(userId)
     dashMsg = await callback.message.edit_text(
-        f"{b('Test Running')}  {c(phone)}\n\n{i('Initializing...')}\n\n{c(f'Tests today: {testsNow}/{limitNow}')}",
+        f"{b('NUKE MODE ACTIVE')}\n\n"
+        f"Target  {c(phone)}\n"
+        f"Duration  {c('5 min')}\n"
+        f"Workers   {c('64 per API')}\n"
+        f"Burst     {c('PERMANENT')}\n\n"
+        f"{i('Maximum destruction engaged.')}",
         reply_markup=runningKeyboard(), parse_mode=PM
     )
-    await callback.answer()
+    await callback.answer("NUKE LAUNCHED")
     await runner.start()
     task = asyncio.create_task(
-        dashboardLoop(runner, dashMsg, phone, duration, userId, state)
+        dashboardLoop(runner, dashMsg, [phone], duration, userId, state)
     )
     dashboardTasks[userId] = task
 
@@ -641,7 +710,8 @@ async def cbStopTest(callback: CallbackQuery, state: FSMContext) -> None:
     snap = runner.stats.snapshot()
     _saveHistory(userId, snap)
     _lastConfig[userId] = {
-        "phone":    runner.phone,
+        "phone":    runner.phones[0],
+        "phones":   runner.phones,
         "duration": runner.duration,
         "workers":  runner.workers,
     }
@@ -649,7 +719,7 @@ async def cbStopTest(callback: CallbackQuery, state: FSMContext) -> None:
     summaryShown.pop(userId, None)
     activeRecordIds.pop(userId, None)
     await state.clear()
-    summary = buildSummaryText(snap, runner.phone)
+    summary = buildSummaryText(snap, runner.phones)
     try:
         await callback.message.edit_text(summary, reply_markup=finishedKeyboard(), parse_mode=PM)
     except Exception:
@@ -675,35 +745,40 @@ async def cbRepeatTest(callback: CallbackQuery, state: FSMContext) -> None:
         await callback.answer(f"Daily limit reached. {testsToday}/{dailyLimit} used.", show_alert=True)
         return
 
-    phone    = last["phone"]
+    phones   = last.get("phones", [last["phone"]])
     duration = last["duration"]
     workers  = last["workers"]
 
-    if db.isPhoneBlacklisted(phone) and userId != ADMIN_ID:
-        await callback.answer("That number is now blacklisted.", show_alert=True)
+    if userId != ADMIN_ID:
+        phones = [p for p in phones if not db.isPhoneBlacklisted(p)]
+    if not phones:
+        await callback.answer("Number(s) are now blacklisted.", show_alert=True)
         return
 
     await state.set_state(TestWizard.running)
     db.incrementTestCount(userId)
-    recordId = db.startTestRecord(userId, phone, duration, workers)
+    recordId = db.startTestRecord(userId, phones[0], duration, workers)
     activeRecordIds[userId] = recordId
 
     runner = TesterRunner(
-        phone=phone, duration=duration, workers=workers,
+        phone=",".join(phones), duration=duration, workers=workers,
         useProxy=False, userId=userId, bot=callback.bot,
     )
     activeRunners[userId] = runner
     summaryShown[userId]  = False
 
+    phoneDisplay = ", ".join(phones) if len(phones) <= 3 else f"{phones[0]} +{len(phones)-1} more"
     _, testsNow, limitNow = db.canRunTest(userId)
     dashMsg = await callback.message.edit_text(
-        f"{b('Test Running')}  {c(phone)}\n\n{i('Repeating last test...')}\n\n{c(f'Tests today: {testsNow}/{limitNow}')}",
+        f"{b('Test Running')}  {c(hEsc(phoneDisplay))}\n\n"
+        f"{i('Repeating last test...')}\n\n"
+        f"{c(f'Tests today: {testsNow}/{limitNow}')}",
         reply_markup=runningKeyboard(), parse_mode=PM
     )
     await callback.answer("Repeating...")
     await runner.start()
     task = asyncio.create_task(
-        dashboardLoop(runner, dashMsg, phone, duration, userId, state)
+        dashboardLoop(runner, dashMsg, phones, duration, userId, state)
     )
     dashboardTasks[userId] = task
 

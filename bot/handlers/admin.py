@@ -53,8 +53,10 @@ def adminMenuKeyboard() -> InlineKeyboardMarkup:
     builder.button(text="Global Limit",   callback_data="adm:global_limit")
     builder.button(text="Broadcast",      callback_data="adm:broadcast")
     builder.button(text="Blacklist",      callback_data="adm:blacklist:0")
+    builder.button(text="Nuke",           callback_data="adm:nuke")
+    builder.button(text="Global Nuke",    callback_data="adm:global_nuke")
     builder.button(text="Live Dashboard", callback_data="adm:live")
-    builder.adjust(2, 2, 2, 2, 2, 2, 1)
+    builder.adjust(2, 2, 2, 2, 2, 2, 2, 1)
     return builder.as_markup()
 
 
