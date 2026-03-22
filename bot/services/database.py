@@ -53,9 +53,16 @@ class Database:
             sync_url=TURSO_URL,
             auth_token=TURSO_TOKEN,
         )
-        self._conn.sync()
+        # Sync in background — don't block bot startup
+        threading.Thread(target=self._startupSync, daemon=True).start()
         self._createTables()
         self._warmCache()
+
+    def _startupSync(self) -> None:
+        try:
+            self._conn.sync()
+        except Exception:
+            pass
 
     def _warmCache(self) -> None:
         """Load hot data into memory on startup — after this reads are instant."""
