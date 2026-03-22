@@ -134,6 +134,7 @@ async def cmdHelp(message: Message) -> None:
 
 @router.callback_query(F.data == "nav:main_menu")
 async def cbMainMenu(callback: CallbackQuery) -> None:
+    await callback.answer()  # answer instantly — stop spinner
     userId = callback.from_user.id
 
     # Streak on every interaction
@@ -159,7 +160,6 @@ async def cbMainMenu(callback: CallbackQuery) -> None:
         reply_markup=mainMenuKeyboard(),
         parse_mode=PM
     )
-    await callback.answer()
 
 
 # ---------------------------------------------------------------------------
@@ -168,6 +168,7 @@ async def cbMainMenu(callback: CallbackQuery) -> None:
 
 @router.callback_query(F.data == "menu:stats")
 async def cbMyStats(callback: CallbackQuery) -> None:
+    await callback.answer()
     userId = callback.from_user.id
     await triggerStreak(userId, callback.bot)
 
@@ -211,7 +212,6 @@ async def cbMyStats(callback: CallbackQuery) -> None:
         reply_markup=builder.as_markup(),
         parse_mode=PM
     )
-    await callback.answer()
 
 
 # ---------------------------------------------------------------------------
@@ -220,13 +220,14 @@ async def cbMyStats(callback: CallbackQuery) -> None:
 
 @router.callback_query(F.data == "menu:referral")
 async def cbReferral(callback: CallbackQuery) -> None:
+    await callback.answer()
     userId = callback.from_user.id
     await triggerStreak(userId, callback.bot)
 
-    code     = db.getReferralCode(userId)
-    count    = db.getReferralCount(userId)
-    botInfo  = await callback.bot.get_me()
-    link     = f"https://t.me/{botInfo.username}?start={code}"
+    code    = db.getReferralCode(userId)
+    count   = db.getReferralCount(userId)
+    botInfo = await callback.bot.get_me()
+    link    = f"https://t.me/{botInfo.username}?start={code}"
 
     builder = InlineKeyboardBuilder()
     builder.button(text="Main Menu", callback_data="nav:main_menu")
@@ -242,4 +243,3 @@ async def cbReferral(callback: CallbackQuery) -> None:
         reply_markup=builder.as_markup(),
         parse_mode=PM
     )
-    await callback.answer()
