@@ -164,10 +164,11 @@ async def cmdAdmin(message: Message, state: FSMContext) -> None:
     from bot.services.api_manager import apiManager
     total   = len(apiManager.getMergedConfigs())
     skipped = len(db.getSkippedApiNames())
+    active  = total - skipped
     maint   = "ON" if db.isMaintenanceMode() else "OFF"
     await message.answer(
         f"{b('Admin Panel')}\n\n"
-        f"APIs        {c(str(total - skipped))} active  {c(str(skipped))} skipped\n"
+        f"APIs        {c(str(total))} total  {c(str(active))} active  {c(str(skipped))} skipped\n"
         f"Users       {c(str(db.getUserCount()))}\n"
         f"Maintenance {c(maint)}",
         reply_markup=adminMenuKeyboard(),
@@ -184,10 +185,11 @@ async def cbAdminMenu(callback: CallbackQuery, state: FSMContext) -> None:
     from bot.services.api_manager import apiManager
     total   = len(apiManager.getMergedConfigs())
     skipped = len(db.getSkippedApiNames())
+    active  = total - skipped
     maint   = "ON" if db.isMaintenanceMode() else "OFF"
     await callback.message.edit_text(
         f"{b('Admin Panel')}\n\n"
-        f"APIs        {c(str(total - skipped))} active  {c(str(skipped))} skipped\n"
+        f"APIs        {c(str(total))} total  {c(str(active))} active  {c(str(skipped))} skipped\n"
         f"Users       {c(str(db.getUserCount()))}\n"
         f"Maintenance {c(maint)}",
         reply_markup=adminMenuKeyboard(),
