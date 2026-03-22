@@ -150,12 +150,13 @@ def formatUserDetail(u: dict) -> str:
 async def cmdCleanup(message: Message) -> None:
     if not isAdmin(message.from_user.id):
         return
-    # Delete all test records with 0 requests (bad records from crashed nuke)
-    db._execute(
-        "DELETE FROM testHistory WHERE totalReqs = 0 AND otpHits = 0"
-    )
+    db._execute("DELETE FROM testHistory WHERE totalReqs = 0 AND otpHits = 0")
     db._forceSync()
     await message.answer("✅ Cleaned up all empty test records.")
+
+
+@router.message(Command("admin"))
+async def cmdAdmin(message: Message, state: FSMContext) -> None:
     if not isAdmin(message.from_user.id):
         await message.answer("Unknown command.")
         return
