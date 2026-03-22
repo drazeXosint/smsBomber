@@ -85,12 +85,8 @@ async def cmdStart(message: Message) -> None:
         except Exception:
             pass
 
-    # Fire streak (after registration so DB row exists)
-    await triggerStreak(userId, message.bot)
-
     u      = db.getUser(userId)
     streak = u.get("streakDays", 0) if u else 0
-    limit  = u.get("dailyLimit", 10) if u else 10
     _, testsToday, effectiveLimit = db.canRunTest(userId)
 
     streakStr = f"🔥 {streak} day streak" if streak > 1 else "🔥 Day 1 — start your streak!"
@@ -103,7 +99,11 @@ async def cmdStart(message: Message) -> None:
         f"{i('Select an option below.')}"
     )
 
+    # Send menu FIRST — instant response
     await message.answer(greeting, reply_markup=mainMenuKeyboard(), parse_mode=PM)
+
+    # Fire streak AFTER menu is shown — non-blocking
+    await triggerStreak(userId, message.bot)
 
 
 # ---------------------------------------------------------------------------
