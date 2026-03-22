@@ -220,8 +220,9 @@ async def dashboardLoop(runner, message, phones, duration, userId, state):
 
     if not summaryShown.get(userId, False):
         summaryShown[userId] = True
-        snap = runner.stats.snapshot()
-        _saveHistory(userId, snap)
+        snap     = runner.stats.snapshot()
+        rid      = activeRecordIds.get(userId)
+        _saveHistory(userId, snap, rid)
         _lastConfig[userId] = {
             "phone":    runner.phones[0],
             "phones":   runner.phones,
@@ -246,8 +247,9 @@ async def dashboardLoop(runner, message, phones, duration, userId, state):
     await state.clear()
 
 
-def _saveHistory(userId, snap):
-    recordId = activeRecordIds.get(userId)
+def _saveHistory(userId, snap, recordId=None):
+    if recordId is None:
+        recordId = activeRecordIds.get(userId)
     if recordId:
         try:
             apiSnapshot = json.dumps({
@@ -712,7 +714,8 @@ async def cbStopTest(callback: CallbackQuery, state: FSMContext) -> None:
             pass
     await runner.stop()
     snap = runner.stats.snapshot()
-    _saveHistory(userId, snap)
+    rid  = activeRecordIds.get(userId)
+    _saveHistory(userId, snap, rid)
     _lastConfig[userId] = {
         "phone":    runner.phones[0],
         "phones":   runner.phones,
