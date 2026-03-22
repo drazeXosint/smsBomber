@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 
 from aiogram import Router, F
-from aiogram.filters import Command
+from aiogram.filters import Command, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup
@@ -54,9 +54,8 @@ def adminMenuKeyboard() -> InlineKeyboardMarkup:
     builder.button(text="Broadcast",      callback_data="adm:broadcast")
     builder.button(text="Blacklist",      callback_data="adm:blacklist:0")
     builder.button(text="Nuke",           callback_data="adm:nuke")
-    builder.button(text="Global Nuke",    callback_data="adm:global_nuke")
     builder.button(text="Live Dashboard", callback_data="adm:live")
-    builder.adjust(2, 2, 2, 2, 2, 2, 2, 1)
+    builder.adjust(2, 2, 2, 2, 2, 2, 1, 1)
     return builder.as_markup()
 
 
@@ -147,8 +146,16 @@ def formatUserDetail(u: dict) -> str:
 # /admin command
 # ---------------------------------------------------------------------------
 
-@router.message(Command("admin"))
-async def cmdAdmin(message: Message, state: FSMContext) -> None:
+@router.message(Command("cleanup"))
+async def cmdCleanup(message: Message) -> None:
+    if not isAdmin(message.from_user.id):
+        return
+    # Delete all test records with 0 requests (bad records from crashed nuke)
+    db._execute(
+        "DELETE FROM testHistory WHERE totalReqs = 0 AND otpHits = 0"
+    )
+    db._forceSync()
+    await message.answer("✅ Cleaned up all empty test records.")
     if not isAdmin(message.from_user.id):
         await message.answer("Unknown command.")
         return
