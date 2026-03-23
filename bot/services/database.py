@@ -58,6 +58,22 @@ class Database:
         self._createTables()
         self._warmCache()
 
+    def __del__(self) -> None:
+        """Cleanup on garbage collection."""
+        try:
+            if hasattr(self, '_conn') and self._conn:
+                self._conn.close()
+        except Exception:
+            pass
+
+    def close(self) -> None:
+        """Explicit cleanup."""
+        try:
+            if self._conn:
+                self._conn.close()
+        except Exception:
+            pass
+
     def _startupSync(self) -> None:
         try:
             self._conn.sync()
