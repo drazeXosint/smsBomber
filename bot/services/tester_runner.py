@@ -60,6 +60,11 @@ def checkHoneypot(name: str, text: str) -> bool:
         return True
     if _HONEYPOT_RE.match(text.strip()):
         _honeypotCounts[name] = _honeypotCounts.get(name, 0) + 1
+
+        # Prevent unbounded growth — cap at 500 entries
+        if len(_honeypotCounts) > 500:
+            _honeypotCounts.clear()
+
         if _honeypotCounts[name] >= HONEYPOT_THRESHOLD:
             _honeypotApis.add(name)
         return True

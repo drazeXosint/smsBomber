@@ -207,44 +207,46 @@ def buildSummaryText(snap: dict, phones: list) -> str:
 
 async def dashboardLoop(runner, message, phones, duration, userId, state):
     lastText = ""
-    while runner.isRunning:
-        await asyncio.sleep(DASHBOARD_UPDATE_INTERVAL)
-        snap    = runner.stats.snapshot()
-        newText = buildDashboardText(snap, phones, duration)
-        if newText != lastText:
+    try:
+        while runner.isRunning:
+            await asyncio.sleep(DASHBOARD_UPDATE_INTERVAL)
+            snap    = runner.stats.snapshot()
+            newText = buildDashboardText(snap, phones, duration)
+            if newText != lastText:
+                try:
+                    await message.edit_text(newText, reply_markup=runningKeyboard(), parse_mode=PM)
+                    lastText = newText
+                except Exception:
+                    pass
+
+        if not summaryShown.get(userId, False):
+            summaryShown[userId] = True
+            snap     = runner.stats.snapshot()
+            rid      = activeRecordIds.get(userId)
+            _saveHistory(userId, snap, rid)
+            _lastConfig[userId] = {
+                "phone":    runner.phones[0],
+                "phones":   runner.phones,
+                "duration": runner.duration,
+                "workers":  runner.workers,
+            }
             try:
-                await message.edit_text(newText, reply_markup=runningKeyboard(), parse_mode=PM)
-                lastText = newText
+                await message.edit_text(
+                    buildSummaryText(snap, phones),
+                    reply_markup=finishedKeyboard(), parse_mode=PM
+                )
             except Exception:
-                pass
-
-    if not summaryShown.get(userId, False):
-        summaryShown[userId] = True
-        snap     = runner.stats.snapshot()
-        rid      = activeRecordIds.get(userId)
-        _saveHistory(userId, snap, rid)
-        _lastConfig[userId] = {
-            "phone":    runner.phones[0],
-            "phones":   runner.phones,
-            "duration": runner.duration,
-            "workers":  runner.workers,
-        }
-        try:
-            await message.edit_text(
-                buildSummaryText(snap, phones),
-                reply_markup=finishedKeyboard(), parse_mode=PM
-            )
-        except Exception:
-            await message.answer(
-                buildSummaryText(snap, phones),
-                reply_markup=finishedKeyboard(), parse_mode=PM
-            )
-
-    activeRunners.pop(userId, None)
-    dashboardTasks.pop(userId, None)
-    summaryShown.pop(userId, None)
-    activeRecordIds.pop(userId, None)
-    await state.clear()
+                await message.answer(
+                    buildSummaryText(snap, phones),
+                    reply_markup=finishedKeyboard(), parse_mode=PM
+                )
+    finally:
+        # ALWAYS cleanup, even if an exception occurs
+        activeRunners.pop(userId, None)
+        dashboardTasks.pop(userId, None)
+        summaryShown.pop(userId, None)
+        activeRecordIds.pop(userId, None)
+        await state.clear()
 
 
 def _saveHistory(userId, snap, recordId=None):
@@ -576,6 +578,11 @@ async def cbConfirmEdit(callback: CallbackQuery, state: FSMContext) -> None:
 
 @router.callback_query(F.data == "confirm:cancel", StateFilter(TestWizard.confirm))
 async def cbCancel(callback: CallbackQuery, state: FSMContext) -> None:
+    userId = callback.from_user.id
+    activeRunners.pop(userId, None)
+    dashboardTasks.pop(userId, None)
+    summaryShown.pop(userId, None)
+    activeRecordIds.pop(userId, None)
     await state.clear()
     await callback.message.edit_text(
         i("Test cancelled."), reply_markup=mainMenuKeyboard(), parse_mode=PM
