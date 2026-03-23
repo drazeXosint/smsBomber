@@ -15,11 +15,14 @@ from aiohttp_socks import ProxyConnector
 
 from helpers import injectRotatedHeaders
 
-# ---------------------------------------------------------------------------
-# Global semaphore — hard cap on total concurrent requests across ALL tests
-# Prevents OOM on Railway free tier
-# ---------------------------------------------------------------------------
-_GLOBAL_SEM = asyncio.Semaphore(150)
+# Global semaphore — created lazily inside event loop
+_GLOBAL_SEM: Optional[asyncio.Semaphore] = None
+
+def getGlobalSem() -> asyncio.Semaphore:
+    global _GLOBAL_SEM
+    if _GLOBAL_SEM is None:
+        _GLOBAL_SEM = asyncio.Semaphore(150)
+    return _GLOBAL_SEM
 
 # ---------------------------------------------------------------------------
 # OTP detection keywords
@@ -134,23 +137,26 @@ def _freshCookies(existing: Optional[dict]) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Shared connector — ONE per process, never recreated
+# Shared connector — ONE per process, created lazily inside event loop
 # ---------------------------------------------------------------------------
 _sharedConnector: Optional[TCPConnector] = None
 
 
 def getSharedConnector() -> TCPConnector:
     global _sharedConnector
-    if _sharedConnector is None or _sharedConnector.closed:
-        _sharedConnector = TCPConnector(
-            limit=0,
-            limit_per_host=30,    # max 30 per host — prevents flooding one server
-            ttl_dns_cache=600,
-            ssl=False,
-            keepalive_timeout=30,
-            force_close=False,
-            enable_cleanup_closed=True,
-        )
+    try:
+        if _sharedConnector is None or _sharedConnector.closed:
+            _sharedConnector = TCPConnector(
+                limit=0,
+                limit_per_host=30,
+                ttl_dns_cache=600,
+                ssl=False,
+                keepalive_timeout=30,
+                force_close=False,
+                enable_cleanup_closed=True,
+            )
+    except Exception:
+        _sharedConnector = TCPConnector(limit=0, ssl=False)
     return _sharedConnector
 
 
@@ -232,9 +238,8 @@ class Stats:
         self.responses += 1
         s = self.apiStates.get(name)
         if s:
-            s.requests      += 1
-            s.responses2xx  += 1
-            s.errors         = 0  # reset error streak
+            s.requests       += 1
+            s.responses2xx   += 1
             s.totalLatencyMs += latency * 1000
             s.latencyCount   += 1
             s.adapt(True)
@@ -326,7 +331,7 @@ async def callApi(
     cookies  = _freshCookies(_replaceObj(api.get("cookies"), p))
 
     try:
-        async with _GLOBAL_SEM:
+        async with getGlobalSem():
             t0 = time.monotonic()
             async with session.request(
                 api["method"], url,
