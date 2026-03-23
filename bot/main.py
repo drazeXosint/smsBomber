@@ -70,6 +70,14 @@ async def mainWebhook() -> None:
     asyncio.create_task(midnightResetLoop())
     asyncio.create_task(scheduledTestsLoop(bot))
 
+    # Memory guard — prevents OOM on Railway free tier
+    try:
+        from memory_guard import memoryGuardLoop
+        from bot.config import ADMIN_ID
+        asyncio.create_task(memoryGuardLoop(bot=bot, adminId=ADMIN_ID))
+    except Exception:
+        pass
+
     # Start distributed coordination
     try:
         from distributed import startDistributed
